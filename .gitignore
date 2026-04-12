@@ -16,3 +16,6 @@ uv.lock
 
 config.user.yaml
 
+# skills
+default_workspace/skills/*
+
