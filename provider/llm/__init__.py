@@ -1,5 +1,5 @@
 """LLM provider abstraction."""
 
-from .base import LLMProvider
+from .base import LLMProvider, LLMToolCall
 
-__all__ = ["LLMProvider"]
+__all__ = ["LLMProvider", "LLMToolCall"]
