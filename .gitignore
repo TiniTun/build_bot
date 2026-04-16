@@ -19,3 +19,4 @@ config.user.yaml
 # skills
 default_workspace/skills/*
 
+.history/
