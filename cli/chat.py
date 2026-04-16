@@ -51,7 +51,7 @@ class ChatLoop:
                 border_style="cyan"
             )
         )
-        self.console.print("Type 'quit' or 'exit' to end the session.\n")
+        self.console.print("Type '/help' for commands, 'quit' or 'exit' to end the session.\n")
 
         try:
             while True:
@@ -65,6 +65,15 @@ class ChatLoop:
                     continue
 
                 try:
+                    # command
+                    cmd_response = await self.session.command_registry.dispatch(
+                        user_input, self.session
+                    )
+                    if cmd_response is not None:
+                        self.console.print(cmd_response)
+                        continue
+
+                    # Normal chat
                     response = await self.session.chat(user_input)
                     self.display_agent_response(response)
                 except Exception as e:

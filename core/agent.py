@@ -12,6 +12,7 @@ from litellm.types.completion import (
     ChatCompletionMessageToolCallParam,
 )
 
+from core.commands.registry import CommandRegistry
 from core.history import HistoryStore
 from core.session_state import SessionState
 from core.skill_loader import SkillLoader
@@ -33,6 +34,7 @@ class Agent:
         self.llm = LLMProvider.from_config(agent_def.llm)
         self.skill_loader = SkillLoader.from_config(config)
         self.history_store = HistoryStore.from_config(config)
+        self.command_registry = CommandRegistry.with_builtins()
 
     def _build_tools(self) -> ToolRegistry:
         """Build a ToolRegistry with tools appropriate for the session."""
@@ -57,7 +59,12 @@ class Agent:
             history_store=self.history_store
         )
 
-        session = AgentSession(agent=self, state=state, tools=tools)
+        session = AgentSession(
+            agent=self,
+            state=state,
+            tools=tools,
+            command_registry=self.command_registry,
+        )
         self.history_store.create_session(self.agent_def.id, session_id) # create_session
 
         return session
@@ -70,6 +77,7 @@ class AgentSession:
     agent: Agent
     state: SessionState
     tools: ToolRegistry
+    command_registry: CommandRegistry
     started_at: datetime = field(default_factory=datetime.now)
 
     @property
