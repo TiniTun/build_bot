@@ -2,5 +2,14 @@
 
 from core.agent import Agent, AgentSession
 from core.agent_loader import AgentDef, AgentLoader
+from core.history import HistoryMessage, HistorySession, HistoryStore
 
-__all__ = ["Agent", "AgentSession", "AgentDef", "AgentLoader"]
+__all__ = [
+    "Agent",
+    "AgentSession",
+    "AgentDef",
+    "AgentLoader", 
+    "HistoryStore",
+    "HistoryMessage",
+    "HistorySession",
+]

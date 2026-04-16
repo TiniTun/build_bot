@@ -32,11 +32,16 @@ class Config(BaseModel):
     default_agent: str
     agent_path: Path = Field(default=Path("agents"))
     skills_path: Path = Field(default=Path("skills"))
+    history_path: Path = Field(default=Path(".history"))
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
         """Resolve relative paths to absolute using workspace."""
-        for field_name in ("agent_path", "skills_path",):
+        for field_name in (
+            "agent_path",
+            "skills_path",
+            "history_path",
+        ):
             path = getattr(self, field_name)
             if not path.is_absolute():
                 setattr(self, field_name, self.workspace / path)

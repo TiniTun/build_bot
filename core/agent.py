@@ -12,10 +12,11 @@ from litellm.types.completion import (
     ChatCompletionMessageToolCallParam,
 )
 
-from provider.llm.base import LLMProvider, LLMToolCall
-from tools.registry import ToolRegistry
+from core.history import HistoryStore
 from core.session_state import SessionState
 from core.skill_loader import SkillLoader
+from provider.llm.base import LLMProvider, LLMToolCall
+from tools.registry import ToolRegistry
 from tools.skill_tool import create_skill_tool
 
 if TYPE_CHECKING:
@@ -31,6 +32,7 @@ class Agent:
         self.config = config
         self.llm = LLMProvider.from_config(agent_def.llm)
         self.skill_loader = SkillLoader.from_config(config)
+        self.history_store = HistoryStore.from_config(config)
 
     def _build_tools(self) -> ToolRegistry:
         """Build a ToolRegistry with tools appropriate for the session."""
@@ -52,9 +54,12 @@ class Agent:
             session_id=session_id,
             agent=self,
             messages=[],
+            history_store=self.history_store
         )
 
         session = AgentSession(agent=self, state=state, tools=tools)
+        self.history_store.create_session(self.agent_def.id, session_id) # create_session
+
         return session
 
 
