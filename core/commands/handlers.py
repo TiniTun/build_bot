@@ -42,7 +42,38 @@ class HelpCommand(Command):
             names = [f"/{cmd.name}"] + [f"/{a}" for a in cmd.aliases]
             lines.append(f"{', '.join(names)} - {cmd.description}")
         return "\n".join(lines)
-    
+
+
+class CompactCommand(Command):
+    """Trigger manual context compaction."""
+
+    name = "compact"
+    description = "Compact conversation context manually"
+
+    async def execute(self, args: str, session: "AgentSession") -> str:
+        # Force compaction regardless of threshold
+        await session.context_guard._compact_messages(session.state)
+        msg_count = len(session.state.messages)
+        return f"✓ Context compacted. {msg_count} messages retained."
+
+
+class ContextCommand(Command):
+    """Show session context information."""
+
+    name = "context"
+    description = "Show session context information"
+
+    async def execute(self, args: str, session: "AgentSession") -> str:
+        token_count = session.context_guard.estimate_tokens(session.state)
+        threshold = session.context_guard.token_threshold
+        usage_pct = (token_count / threshold) * 100 if threshold > 0 else 0
+
+        lines = [
+            f"**Messages:** {len(session.state.messages)}",
+            f"**Tokens:** {token_count:,} ({usage_pct:.1f}% of {threshold:,} threshold)",
+        ]
+        return "\n".join(lines)
+
 
 class SkillsCommand(Command):
     """List all skills or show skill details."""

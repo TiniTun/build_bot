@@ -62,11 +62,15 @@ class CommandRegistry:
         from core.commands.handlers import (
             HelpCommand,
             SkillsCommand,
+            CompactCommand,
+            ContextCommand,
             SessionCommand,
         )
 
         registry = cls()
         registry.register(HelpCommand())
         registry.register(SkillsCommand())
+        registry.register(CompactCommand())
+        registry.register(ContextCommand())
         registry.register(SessionCommand())
         return registry

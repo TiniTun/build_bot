@@ -13,6 +13,7 @@ from litellm.types.completion import (
 )
 
 from core.commands.registry import CommandRegistry
+from core.context_guard import ContextGuard
 from core.history import HistoryStore
 from core.session_state import SessionState
 from core.skill_loader import SkillLoader
@@ -47,10 +48,19 @@ class Agent:
 
         return registry
 
+    def _get_token_threshold(self) -> int:
+        """Get token threshold based on model's context window."""
+        # Default to 80% of 200k context
+        return 160000
+
     def new_session(self, session_id: str | None = None) -> "AgentSession":
         """Create a new conversation session."""
         session_id = session_id or str(uuid.uuid4())
         tools = self._build_tools()
+
+        context_guard = ContextGuard(
+            token_threshold=self._get_token_threshold()
+        )
 
         state = SessionState(
             session_id=session_id,
@@ -62,6 +72,7 @@ class Agent:
         session = AgentSession(
             agent=self,
             state=state,
+            context_guard=context_guard,
             tools=tools,
             command_registry=self.command_registry,
         )
@@ -76,6 +87,7 @@ class AgentSession:
 
     agent: Agent
     state: SessionState
+    context_guard: ContextGuard
     tools: ToolRegistry
     command_registry: CommandRegistry
     started_at: datetime = field(default_factory=datetime.now)
@@ -95,6 +107,9 @@ class AgentSession:
         while True:
 
             messages = self.state.build_messages()
+
+            self.state = await self.context_guard.check_and_compact(self.state)
+
             content, tool_calls = await self.agent.llm.chat(messages, tool_schemas)
 
             tool_call_dicts: list[ChatCompletionMessageToolCallParam] = [
