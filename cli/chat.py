@@ -18,7 +18,7 @@ from server import (
     AgentWorker,
     Worker,
 )
-from utils.config import Config
+from utils.config import Config, ConfigReloader
 
 
 class ChatLoop:
@@ -28,6 +28,7 @@ class ChatLoop:
         self.config = config
         self.console = Console()
         self.context = SharedContext(config=config)
+        self.config_reloader = ConfigReloader(config)
 
         self.workers: list[Worker] = [
             self.context.eventbus,
@@ -67,6 +68,8 @@ class ChatLoop:
             )
         )
         self.console.print("Type '/help' for commands, 'quit' or 'exit' to end the session.\n")
+
+        self.config_reloader.start()
 
         for worker in self.workers:
             worker.start()
