@@ -12,39 +12,45 @@ from litellm.types.completion import (
     ChatCompletionMessageToolCallParam,
 )
 
-from core.commands.registry import CommandRegistry
 from core.context_guard import ContextGuard
-from core.history import HistoryStore
 from core.session_state import SessionState
-from core.skill_loader import SkillLoader
-from provider.llm.base import LLMProvider, LLMToolCall
+from provider.llm.base import LLMProvider
 from tools.registry import ToolRegistry
 from tools.skill_tool import create_skill_tool
+from tools.websearch_tool import create_websearch_tool
+from tools.webread_tool import create_webread_tool
 
 if TYPE_CHECKING:
+    from core.context import SharedContext
     from core.agent_loader import AgentDef
-    from  utils.config import Config
+    from provider.llm import LLMToolCall
 
 
 class Agent:
     """A configured agent that creates and manages conversation sessions."""
 
-    def __init__(self, agent_def: "AgentDef", config: "Config") -> None:
+    def __init__(self, agent_def: "AgentDef", context: "SharedContext") -> None:
         self.agent_def = agent_def
-        self.config = config
+        self.context = context
         self.llm = LLMProvider.from_config(agent_def.llm)
-        self.skill_loader = SkillLoader.from_config(config)
-        self.history_store = HistoryStore.from_config(config)
-        self.command_registry = CommandRegistry.with_builtins()
 
     def _build_tools(self) -> ToolRegistry:
         """Build a ToolRegistry with tools appropriate for the session."""
         registry = ToolRegistry.with_builtins()
 
         if self.agent_def.allow_skills:
-            skill_tool = create_skill_tool(self.skill_loader)
+            skill_tool = create_skill_tool(self.context.skill_loader)
             if skill_tool:
                 registry.register(skill_tool)
+
+        # Add web tools if configured
+        websearch_tool = create_websearch_tool(self.context.config)
+        if websearch_tool:
+            registry.register(websearch_tool)
+
+        webread_tool = create_webread_tool(self.context.config)
+        if webread_tool:
+            registry.register(webread_tool)
 
         return registry
 
@@ -59,6 +65,7 @@ class Agent:
         tools = self._build_tools()
 
         context_guard = ContextGuard(
+            shared_context=self.context,
             token_threshold=self._get_token_threshold()
         )
 
@@ -66,7 +73,7 @@ class Agent:
             session_id=session_id,
             agent=self,
             messages=[],
-            history_store=self.history_store
+            shared_context=self.context
         )
 
         session = AgentSession(
@@ -74,11 +81,52 @@ class Agent:
             state=state,
             context_guard=context_guard,
             tools=tools,
-            command_registry=self.command_registry,
         )
-        self.history_store.create_session(self.agent_def.id, session_id) # create_session
+        self.context.history_store.create_session(self.agent_def.id, session_id) # create_session
 
         return session
+    
+    def resume_session(self, session_id: str) -> "AgentSession":
+        """Load an existing conversation session."""
+        session_query = [
+            session
+            for session in self.context.history_store.list_sessions()
+            if session.id == session_id
+        ]
+        if not session_query:
+            raise ValueError(f"Session not found: {session_id}")
+
+        session_info = session_query[0]
+
+        # Get all messages (no max_history limit)
+        history_messages = self.context.history_store.get_messages(session_id)
+
+        # Convert HistoryMessage to litellm Message format
+        messages: list[Message] = [msg.to_message() for msg in history_messages]
+
+        # Build tools for resumed session
+        tools = self._build_tools()
+
+        # Create context guard
+        context_guard = ContextGuard(
+            shared_context=self.context,
+            token_threshold=self._get_token_threshold(),
+        )
+
+        # Create SessionState with loaded messages
+        state = SessionState(
+            session_id=session_info.id,
+            agent=self,
+            messages=messages,
+            shared_context=self.context,
+        )
+
+        return AgentSession(
+            agent=self,
+            state=state,
+            context_guard=context_guard,
+            tools=tools,
+        )
 
 
 @dataclass
@@ -89,13 +137,17 @@ class AgentSession:
     state: SessionState
     context_guard: ContextGuard
     tools: ToolRegistry
-    command_registry: CommandRegistry
     started_at: datetime = field(default_factory=datetime.now)
 
     @property
     def session_id(self) -> str:
         """Delegate to state."""
         return self.state.session_id
+
+    @property
+    def shared_context(self) -> "SharedContext":
+        """Delegate to state."""
+        return self.state.shared_context
 
     async def chat(self, message: str) -> str:
         """Send a message to the LLM and get a response."""
@@ -156,7 +208,7 @@ class AgentSession:
 
     async def _execute_tool_call(
         self,
-        tool_call: LLMToolCall,
+        tool_call: "LLMToolCall",
     ) -> str:
         """Execute a single tool call."""
         try:

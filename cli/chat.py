@@ -9,7 +9,15 @@ from rich.prompt import Prompt
 from rich.text import Text
 
 from core.agent import Agent
-from core.agent_loader import AgentLoader
+from core.context import SharedContext
+from core.events import (
+    OutboundEvent,
+    InboundEvent,
+)
+from server import (
+    AgentWorker,
+    Worker,
+)
 from utils.config import Config
 
 
@@ -19,15 +27,22 @@ class ChatLoop:
     def __init__(self, config: Config, agent_id: str | None = None):
         self.config = config
         self.console = Console()
+        self.context = SharedContext(config=config)
 
-        # Load agent
-        loader = AgentLoader(config)
+        self.workers: list[Worker] = [
+            self.context.eventbus,
+            AgentWorker(self.context)
+        ]
+
+        self.response_queue: asyncio.Queue[OutboundEvent] = asyncio.Queue()
+        self.context.eventbus.subscribe(OutboundEvent, self.handle_outbound_event)
+
         agent_id = agent_id or config.default_agent
-        self.agent_def = loader.load(agent_id)
+        self.agent_def = self.context.agent_loader.load(agent_id)
 
-        # Create agent and session
-        self.agent = Agent(self.agent_def, config)
-        self.session = self.agent.new_session()
+    async def handle_outbound_event(self, event: OutboundEvent) -> None:
+        """Handle outbound events by adding to response queue."""
+        await self.response_queue.put(event)
 
     def get_user_input(self) -> str:
         """Get user input with styled prompt."""
@@ -53,6 +68,13 @@ class ChatLoop:
         )
         self.console.print("Type '/help' for commands, 'quit' or 'exit' to end the session.\n")
 
+        for worker in self.workers:
+            worker.start()
+
+        session_id = (
+            Agent(self.agent_def, self.context).new_session().session_id
+        )
+
         try:
             while True:
                 user_input = await asyncio.to_thread(self.get_user_input)
@@ -64,23 +86,27 @@ class ChatLoop:
                 if not user_input:
                     continue
 
-                try:
-                    # command
-                    cmd_response = await self.session.command_registry.dispatch(
-                        user_input, self.session
-                    )
-                    if cmd_response is not None:
-                        self.console.print(cmd_response)
-                        continue
+                event = InboundEvent(
+                    session_id=session_id,
+                    content=user_input,
+                )
+                await self.context.eventbus.publish(event)
 
+                try:
                     # Normal chat
-                    response = await self.session.chat(user_input)
-                    self.display_agent_response(response)
-                except Exception as e:
-                    self.console.print(f"Error: {e}", style="bold red")
+                    response = await asyncio.wait_for(
+                        self.response_queue.get(), timeout=60.0
+                    )
+                    self.display_agent_response(response.content)
+                except asyncio.TimeoutError:
+                    self.console.print("[red]Agent response timed out[/red]")
+                    self.console.print()
         
         except (KeyboardInterrupt, EOFError):
             self.console.print("\nGoodbye!", style="bold yellow")
+        finally:
+            for worker in self.workers:
+                await worker.stop()
 
 
 def chat_command(ctx: typer.Context, agent_id: str | None = None) -> None:

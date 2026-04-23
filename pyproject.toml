@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "asyncio>=4.0.0",
+    "crawl4ai>=0.8.6",
     "litellm>=1.83.0",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
@@ -23,3 +24,14 @@ packages = ["cli", "core", "provider", "utils"]
 
 [project.scripts]
 build-bot = "cli.main:app"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = [
+    "E501",  # line too long
+    "F401",  # unused imports
+]

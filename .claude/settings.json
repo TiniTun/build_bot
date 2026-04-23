@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(npm run *)",
+      "Bash(python *)",
+      "Bash(git status)",
+      "Bash(git diff *)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Read",
+      "Write",
+      "Edit"
+    ],
+    "deny": [
+      "Bash(rm -rf *)",
+      "Bash(curl *)",
+      "Read(./default_workspace/config.user.yaml)",
+      "Read(./default_workspace/config.*.yaml)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Skill(gsd-*)"
+    ]
+  }
+}

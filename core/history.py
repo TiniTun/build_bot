@@ -160,7 +160,7 @@ class HistoryStore:
         sessions.sort(key=lambda s: s.update_at, reverse=True)
         self._write_index(sessions)
 
-    def list_session(self) -> list[HistorySession]:
+    def list_sessions(self) -> list[HistorySession]:
         """List all sessions, most recently updated first."""
         sessions = self._read_index()
         sessions.sort(key=lambda s: s.update_at, reverse=True)

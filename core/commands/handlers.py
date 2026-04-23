@@ -16,7 +16,7 @@ class SessionCommand(Command):
     description = "Show current session details"
 
     async def execute(self, args: str, session: "AgentSession") -> str:
-        info = session.agent.history_store.get_session_info(session.session_id)
+        info = session.shared_context.history_store.get_session_info(session.session_id)
 
         created_str = info.created_at if info else "Unknown"
 
@@ -38,7 +38,7 @@ class HelpCommand(Command):
 
     async def execute(self, args: str, session: "AgentSession") -> str:
         lines = ["**Available Commands:**"]
-        for cmd in session.command_registry.list_commands():
+        for cmd in session.shared_context.command_registry.list_commands():
             names = [f"/{cmd.name}"] + [f"/{a}" for a in cmd.aliases]
             lines.append(f"{', '.join(names)} - {cmd.description}")
         return "\n".join(lines)
@@ -83,7 +83,7 @@ class SkillsCommand(Command):
 
     async def execute(self, args: str, session: "AgentSession") -> str:
         if not args:
-            skills = session.agent.skill_loader.discover_skills()
+            skills = session.shared_context.skill_loader.discover_skills()
             if not skills:
                 return "No skills configured."
 
@@ -95,7 +95,7 @@ class SkillsCommand(Command):
         # Show specific skill details
         skill_id = args.strip()
         try:
-            skill = session.agent.skill_loader.load_skill(skill_id)
+            skill = session.shared_context.skill_loader.load_skill(skill_id)
         except DefNotFoundError:
             return f"✗ Skill `{skill_id}` not found."
 

@@ -5,3 +5,4 @@ PyYAML
 typer
 rich
 litellm
+crawl4ai

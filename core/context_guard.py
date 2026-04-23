@@ -10,8 +10,10 @@ from litellm.types.completion import (
     ChatCompletionToolMessageParam,
 )
 
+from core.session_state import SessionState
+
 if TYPE_CHECKING:
-    from core.session_state import SessionState
+    from core.context import SharedContext
 
 
 # Default max size for tool result content before truncation
@@ -21,6 +23,7 @@ MAX_TOOL_RESULT_CHARS = 10000
 class ContextGuard:
     """Manages context window size with proactive compaction."""
 
+    shared_context: "SharedContext"
     token_threshold: int = 160000  # 80% of 200k context
     max_tool_result_chars: int = MAX_TOOL_RESULT_CHARS
 

@@ -1,7 +1,7 @@
 """Configuration management."""
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -24,6 +24,20 @@ class LLMConfig(BaseModel):
             raise ValueError("api_base must be a valid URL")
         return v
 
+
+class BraveWebSearchConfig(BaseModel):
+    """Configuration for web search provider."""
+
+    provider: Literal["brave"] = "brave"
+    api_key: str
+
+
+class Crawl4AIWebReadConfig(BaseModel):
+    """Configuration for web read provider."""
+
+    provider: Literal["crawl4ai"] = "crawl4ai"
+
+
 class Config(BaseModel):
     """Main configuration"""
 
@@ -33,6 +47,8 @@ class Config(BaseModel):
     agent_path: Path = Field(default=Path("agents"))
     skills_path: Path = Field(default=Path("skills"))
     history_path: Path = Field(default=Path(".history"))
+    websearch: BraveWebSearchConfig | None = None
+    webread:Crawl4AIWebReadConfig | None = None
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
