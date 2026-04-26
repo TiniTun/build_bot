@@ -1,8 +1,85 @@
 """Event types and data classes for the event bus."""
 
 import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
+
+
+class EventSource(ABC):
+    """Abstract base for all event sources."""
+
+    _registry: ClassVar[dict[str, type["EventSource"]]] = {}
+    _namespace: ClassVar[str] = ""
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        if cls._namespace:
+            cls._registry[cls._namespace] = cls
+
+    @property
+    def is_platform(self) -> bool:
+        return self._namespace.startswith("platform-")
+
+    @property
+    def is_agent(self) -> bool:
+        return self._namespace == "agent"
+
+    @property
+    def is_cron(self) -> bool:
+        return self._namespace == "cron"
+
+    @property
+    def platform_name(self) -> str | None:
+        if not self.is_platform:
+            return None
+        return self._namespace.split("-", 1)[1]
+
+    @classmethod
+    def from_string(cls, s: str) -> "EventSource":
+        """Parse string to EventSource using namespace registry."""
+        namespace = s.split(":")[0]
+        source_cls = cls._registry.get(namespace)
+        if not source_cls:
+            raise ValueError(f"Unknown source namespace: {namespace}")
+        return source_cls.from_string(s)
+
+    @abstractmethod
+    def __str__(self) -> str: ...
+
+
+@dataclass
+class AgentEventSource(EventSource):
+    """Source for agent-generated events."""
+
+    _namespace = "agent"
+    agent_id: str
+
+    def __str__(self) -> str:
+        return f"agent:{self.agent_id}"
+
+    @classmethod
+    def from_string(cls, s: str) -> "AgentEventSource":
+        _, agent_id = s.split(":", 1)
+        return cls(agent_id=agent_id)
+
+
+@dataclass
+class CliEventSource(EventSource):
+    """Source for CLI-originated events."""
+
+    _namespace = "platform-cli"
+
+    def __str__(self) -> str:
+        return "platform-cli:cli-user"
+
+    @classmethod
+    def from_string(cls, s: str) -> "CliEventSource":
+        return cls()
+
+    @property
+    def platform_name(self) -> str:
+        return "cli"
 
 
 @dataclass
@@ -10,6 +87,7 @@ class Event:
     """Base class for all typed events."""
 
     session_id: str
+    source: EventSource  # Changed from str to typed EventSource
     content: str
     timestamp: float = field(default_factory=time.time)
     
@@ -18,7 +96,10 @@ class Event:
         result: dict[str, Any] = {"type": self.__class__.__name__}
         for field_name in self.__dataclass_fields__:
             value = getattr(self, field_name)
-            result[field_name] = value
+            if field_name == "source":
+                result[field_name] = str(value)
+            else:
+                result[field_name] = value
 
         return result
     
@@ -29,6 +110,8 @@ class Event:
         for k, v in data.items():
             if k == "type":
                 continue
+            if k == "source":
+                kwargs[k] = EventSource.from_string(v)
             elif k in cls.__dataclass_fields__:
                 kwargs[k] = v
         return cls(**kwargs)

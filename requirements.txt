@@ -7,3 +7,4 @@ rich
 litellm
 crawl4ai
 watchdog
+python-telegram-bot

@@ -13,6 +13,7 @@ from core.context import SharedContext
 from core.events import (
     OutboundEvent,
     InboundEvent,
+    CliEventSource
 )
 from server import (
     AgentWorker,
@@ -44,6 +45,7 @@ class ChatLoop:
     async def handle_outbound_event(self, event: OutboundEvent) -> None:
         """Handle outbound events by adding to response queue."""
         await self.response_queue.put(event)
+        self.context.eventbus.ack(event)
 
     def get_user_input(self) -> str:
         """Get user input with styled prompt."""
@@ -75,7 +77,7 @@ class ChatLoop:
             worker.start()
 
         session_id = (
-            Agent(self.agent_def, self.context).new_session().session_id
+            Agent(self.agent_def, self.context).new_session(CliEventSource()).session_id
         )
 
         try:
@@ -91,6 +93,7 @@ class ChatLoop:
 
                 event = InboundEvent(
                     session_id=session_id,
+                    source=CliEventSource(),
                     content=user_input,
                 )
                 await self.context.eventbus.publish(event)

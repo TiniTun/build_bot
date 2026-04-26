@@ -9,6 +9,7 @@ from core.history import HistoryMessage
 if TYPE_CHECKING:
     from core.agent import Agent
     from core.context import SharedContext
+    from core.events import EventSource
 
 @dataclass
 class SessionState:
@@ -17,6 +18,7 @@ class SessionState:
     session_id: str
     agent: "Agent"
     messages: list[Message]
+    source: "EventSource"
     shared_context: "SharedContext"
 
     def add_message(self, message: Message) -> None:

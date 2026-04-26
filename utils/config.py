@@ -28,6 +28,14 @@ class LLMConfig(BaseModel):
         return v
 
 
+class TelegramConfig(BaseModel):
+    """Telegram platform configuration."""
+
+    enabled: bool = True
+    bot_token: str
+    allowed_user_ids: list[str] = Field(default_factory=list)
+
+
 class BraveWebSearchConfig(BaseModel):
     """Configuration for web search provider."""
 
@@ -41,6 +49,19 @@ class Crawl4AIWebReadConfig(BaseModel):
     provider: Literal["crawl4ai"] = "crawl4ai"
 
 
+class SourceSessionConfig(BaseModel):
+    """Session affinity configuration for a source."""
+
+    session_id: str
+
+
+class ChannelConfig(BaseModel):
+    """Channel configuration."""
+
+    enabled: bool = False
+    telegram: TelegramConfig | None = None
+
+
 class Config(BaseModel):
     """Main configuration"""
 
@@ -49,9 +70,14 @@ class Config(BaseModel):
     default_agent: str
     agent_path: Path = Field(default=Path("agents"))
     skills_path: Path = Field(default=Path("skills"))
+    logging_path: Path = Field(default=Path(".logs"))
     history_path: Path = Field(default=Path(".history"))
+    event_path: Path = Field(default=Path(".event"))
     websearch: BraveWebSearchConfig | None = None
     webread:Crawl4AIWebReadConfig | None = None
+    channels: ChannelConfig = Field(default_factory=ChannelConfig)
+    sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
+    default_delivery_source: str | None = None
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
@@ -59,7 +85,10 @@ class Config(BaseModel):
         for field_name in (
             "agent_path",
             "skills_path",
+            "logging_path",
             "history_path",
+            "history_path",
+            "event_path",
         ):
             path = getattr(self, field_name)
             if not path.is_absolute():

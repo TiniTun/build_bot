@@ -7,6 +7,7 @@ from dataclasses import replace
 from .worker import SubscriberWorker
 from core.agent import Agent
 from core.events import (
+    AgentEventSource,
     InboundEvent,
     OutboundEvent,
 )
@@ -44,7 +45,7 @@ class AgentWorker(SubscriberWorker):
         except DefNotFoundError as e:
             logger.error(f"Agent not found: {agent_id}: {e}")
 
-            return await self._emit_response(event, "", str(e))
+            return await self._emit_response(event, content="", agent_id=agent_def.id, error=str(e))
 
         asyncio.create_task(self.exec_session(event, agent_def))
 
@@ -70,18 +71,14 @@ class AgentWorker(SubscriberWorker):
                 )
                 if result:
                     # Emit response and skip agent chat
-                    await self._emit_response(event, result)
+                    await self._emit_response(event, content=result, agent_id=agent_def.id)
                     logger.info(f"Command completed: {session_id}")
                     return
 
             response = await session.chat(event.content)
             logger.info(f"Session completed: {session_id}")
 
-            result_event = OutboundEvent(
-                session_id=event.session_id,
-                content=response,
-            )
-            await self.context.eventbus.publish(result_event)
+            await self._emit_response(event, content=response, agent_id=agent_def.id)
         
         except Exception as e:
             logger.error(f"Session failed: {e}, ")
@@ -95,18 +92,20 @@ class AgentWorker(SubscriberWorker):
                 )
                 await self.context.eventbus.publish(retry_event)
             else:
-                await self._emit_response(event, "", str(e))
+                await self._emit_response(event, content="", agent_id=agent_def.id, error=str(e))
 
     async def _emit_response(
         self,
         event: InboundEvent,
         content: str,
+        agent_id: str,
         error: str | None = None,
     ) -> None:
         """Emit response event with content."""
 
         result_event = OutboundEvent(
             session_id=event.session_id,
+            source=AgentEventSource(agent_id),
             content=content,
             error=str(error) if error else None,
         )

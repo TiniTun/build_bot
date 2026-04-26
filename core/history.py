@@ -4,9 +4,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, TYPE_CHECKING
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from litellm.types.completion import ChatCompletionMessageParam as Message
+
+from core.events import EventSource
 
 if TYPE_CHECKING:
     from utils.config import Config
@@ -21,10 +23,22 @@ class HistorySession(BaseModel):
 
     id: str
     agent_id: str
+    source: str  # Serialized EventSource (e.g., "platform-telegram:123:456")
     title: str | None = None
     message_count: int = 0
     created_at: str
     update_at: str
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def parse_source(cls, v: Any) -> str:
+        if hasattr(v, "__str__"):
+            return str(v)
+        return v
+
+    def get_source(self) -> EventSource:
+        """Get the session's EventSource."""
+        return EventSource.from_string(self.source)
 
 
 class HistoryMessage(BaseModel):
@@ -58,6 +72,26 @@ class HistoryMessage(BaseModel):
             tool_calls=tool_calls,
             tool_call_id=tool_call_id
         )
+
+    def to_message(self) -> Message:
+        """Convert HistoryMessage to litellm Message format."""
+        base: dict[str, Any] = {
+            "role": self.role,
+            "content": self.content,
+        }
+
+        if self.role == "assistant" and self.tool_calls:
+            return {
+                "role": "assistant",
+                "content": self.content,
+                "tool_calls": self.tool_calls,
+            }
+
+        if self.role == "tool" and self.tool_call_id:
+            base["tool_call_id"] = self.tool_call_id
+            return base
+
+        return base
 
 
 class HistoryStore:
@@ -110,13 +144,16 @@ class HistoryStore:
                 return i
         return -1
     
-    def create_session(self, agent_id: str, session_id: str) -> dict[str, Any]:
+    def create_session(
+        self, agent_id: str, session_id: str, source: "EventSource",
+    ) -> dict[str, Any]:
         """Create a new conversation session."""
         
         now = _now_iso()
         session = HistorySession(
             id=session_id,
             agent_id=agent_id,
+            source=source,
             title=None,
             message_count=0,
             created_at=now,

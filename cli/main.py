@@ -7,6 +7,7 @@ import typer
 from rich.console import Console
 
 from cli.chat import chat_command
+from cli.server import server_command
 from utils.config import Config
 
 app = typer.Typer(
@@ -18,11 +19,13 @@ app = typer.Typer(
 
 console = Console()
 
+
 def workspace_callback(ctx: typer.Context, workspace: str) -> Path:
     """Store workspace path in context for later use."""
     ctx.ensure_object(dict)
     ctx.obj["workspace"] = Path(workspace)
     return Path(workspace)
+
 
 @app.callback()
 def main(
@@ -65,6 +68,13 @@ def chat(
 ) -> None:
     """Start interactive chat session."""
     chat_command(ctx, agent_id=agent)
+
+
+@app.command("server")
+def server(ctx: typer.Context) -> None:
+    """Start the 24/7 server for cron and messagebus execution."""
+    server_command(ctx)
+
 
 if __name__ == "__main__":
     app()

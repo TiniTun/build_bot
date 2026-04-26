@@ -1,5 +1,8 @@
 """Agent and AgentSession"""
 
+from core.history import HistorySession
+
+
 import asyncio
 import json
 import uuid
@@ -14,7 +17,8 @@ from litellm.types.completion import (
 
 from core.context_guard import ContextGuard
 from core.session_state import SessionState
-from provider.llm.base import LLMProvider
+from core.events import EventSource
+from provider.llm import LLMProvider
 from tools.registry import ToolRegistry
 from tools.skill_tool import create_skill_tool
 from tools.websearch_tool import create_websearch_tool
@@ -59,7 +63,11 @@ class Agent:
         # Default to 80% of 200k context
         return 160000
 
-    def new_session(self, session_id: str | None = None) -> "AgentSession":
+    def new_session(
+        self,
+        source: EventSource,
+        session_id: str | None = None
+    ) -> "AgentSession":
         """Create a new conversation session."""
         session_id = session_id or str(uuid.uuid4())
         tools = self._build_tools()
@@ -73,6 +81,7 @@ class Agent:
             session_id=session_id,
             agent=self,
             messages=[],
+            source=source,
             shared_context=self.context
         )
 
@@ -82,7 +91,9 @@ class Agent:
             context_guard=context_guard,
             tools=tools,
         )
-        self.context.history_store.create_session(self.agent_def.id, session_id) # create_session
+        self.context.history_store.create_session(
+            self.agent_def.id, session_id, source
+        ) # create_session
 
         return session
     
@@ -96,7 +107,8 @@ class Agent:
         if not session_query:
             raise ValueError(f"Session not found: {session_id}")
 
-        session_info = session_query[0]
+        session_info: HistorySession = session_query[0]
+        source: EventSource = session_info.get_source()
 
         # Get all messages (no max_history limit)
         history_messages = self.context.history_store.get_messages(session_id)
@@ -118,6 +130,7 @@ class Agent:
             session_id=session_info.id,
             agent=self,
             messages=messages,
+            source=source,
             shared_context=self.context,
         )
 
