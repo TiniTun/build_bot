@@ -78,6 +78,7 @@ class EventBus(Worker):
 
     async def _dispatch(self, event: Event) -> None:
         """Persist if OUTBOUND, then notify subscribers."""
+        await self._persist_outbound(event)
         await self._notify_subscribers(event)
         logger.debug(f"Dispatched {event.__class__.__name__} event")
 
@@ -103,7 +104,7 @@ class EventBus(Worker):
         tmp_path = self.pending_dir / f".tmp.{os.getpid()}.{filename}"
 
         data = json.dumps(event.to_dict(), ensure_ascii=False)
-
+        
         # Atomic write: tmp + fsync + rename
         with open(tmp_path, "w", encoding="utf-8") as f:
             f.write(data)
@@ -141,6 +142,7 @@ class EventBus(Worker):
         """Acknowledge successful delivery, delete persisted event."""
         filename = f"{event.timestamp}_{event.session_id}.json"
         final_path = self.pending_dir / filename
+
         if final_path.exists():
             final_path.unlink()
             logger.debug(f"Acked and deleted {filename}")

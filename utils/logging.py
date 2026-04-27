@@ -15,8 +15,15 @@ def setup_logging(config: Config, console_output: bool = False) -> None:
     console_format = "%(levelname)s - %(name)s - %(message)s"
     console_formatter = logging.Formatter(console_format)
 
-    root_logger = logging.getLogger("built-bot")
+    root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)                                                     
+    logging.getLogger("litellm").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
+    logging.getLogger("watchdog").setLevel(logging.WARNING)
 
     config.logging_path.mkdir(parents=True, exist_ok=True)
     file_handler = RotatingFileHandler(

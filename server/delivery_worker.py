@@ -38,7 +38,6 @@ def compute_backoff_ms(retry_count: int) -> int:
 # Platform message size limits
 PLATFORM_LIMITS: dict[str, float] = {
     "telegram": 4096,
-    "discord": 2000,
     "cli": float("inf"),  # no limit
 }
 
@@ -178,7 +177,7 @@ class DeliveryWorker(SubscriberWorker):
                 if not success:
                     self.logger.error(f"Dropped message for session {event.session_id}")
 
-            self.context.eventbus.ack(event)
+                self.context.eventbus.ack(event)
             self.logger.info(
                 f"Delivered message to {source.platform_name} for session {event.session_id}"
             )

@@ -20,6 +20,7 @@ from server import (
     Worker,
 )
 from utils.config import Config, ConfigReloader
+from utils.logging import setup_logging
 
 
 class ChatLoop:
@@ -118,6 +119,7 @@ class ChatLoop:
 def chat_command(ctx: typer.Context, agent_id: str | None = None) -> None:
     """Start interactive chat session."""
     config = ctx.obj.get("config")
+    setup_logging(config, console_output=False)
 
     chat_loop = ChatLoop(config, agent_id=agent_id)
     asyncio.run(chat_loop.run())
