@@ -8,3 +8,5 @@ litellm
 crawl4ai
 watchdog
 python-telegram-bot
+fastapi
+uvicorn[standard]

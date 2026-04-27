@@ -62,6 +62,13 @@ class ChannelConfig(BaseModel):
     telegram: TelegramConfig | None = None
 
 
+class ApiConfig(BaseModel):
+    """HTTP API configuration."""
+
+    host: str = "127.0.0.1"
+    port: int = Field(default=8005, gt=0, lt=65536)
+
+
 class Config(BaseModel):
     """Main configuration"""
 
@@ -76,6 +83,7 @@ class Config(BaseModel):
     websearch: BraveWebSearchConfig | None = None
     webread:Crawl4AIWebReadConfig | None = None
     channels: ChannelConfig = Field(default_factory=ChannelConfig)
+    api: ApiConfig = Field(default_factory=ApiConfig)
     sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
     default_delivery_source: str | None = None
 

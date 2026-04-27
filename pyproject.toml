@@ -7,14 +7,15 @@ requires-python = ">=3.11"
 dependencies = [
     "asyncio>=4.0.0",
     "crawl4ai>=0.8.6",
+    "fastapi>=0.136.1",
     "litellm>=1.83.0",
     "pydantic>=2.12.5",
     "python-telegram-bot>=22.7",
     "pyyaml>=6.0.3",
     "rich>=14.3.3",
     "ruff>=0.15.9",
-    "telegram>=0.0.1",
     "typer>=0.24.1",
+    "uvicorn[standard]>=0.46.0",
     "watchdog>=6.0.0",
 ]
 

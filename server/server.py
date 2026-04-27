@@ -7,12 +7,14 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING
 
-from core.agent import Agent
+import uvicorn
 
 from .worker import Worker
 from .agent_worker import AgentWorker
 from .delivery_worker import DeliveryWorker
 from .channel_worker import ChannelWorker
+from .websocket_worker import WebSocketWorker
+from .app import create_app
 from utils.config import ConfigReloader
 
 if TYPE_CHECKING:
@@ -34,6 +36,10 @@ class Server:
         self._setup_workers()
         self._start_workers()
 
+        # Start API server if configured
+        if self.context.config.api:
+            self._api_task = asyncio.create_task(self._run_api())
+
         try:
             await self._monitor_workers()
         except asyncio.CancelledError:
@@ -45,10 +51,15 @@ class Server:
         """Create all workers."""
         self.config_reloader.start()
 
+        # Create WebSocketWorker first and attach to context
+        ws_worker = WebSocketWorker(self.context)
+        self.context.websocket_worker = ws_worker
+
         self.workers = [
             self.context.eventbus,  # EventBus (active worker)
             AgentWorker(self.context),  # SubscriberWorker
             DeliveryWorker(self.context),  # SubscriberWorker
+            ws_worker, # WebSocketWorker (SubscriberWorker)
         ]
 
         if self.context.config.channels.enabled:
@@ -92,3 +103,20 @@ class Server:
         # Stop config reloader
         if self.config_reloader is not None:
             self.config_reloader.stop()
+
+    async def _run_api(self) -> None:
+        """Run the WebSocket API server."""
+        if not self.context.config.api:
+            return
+
+        app = create_app(self.context)
+        config = uvicorn.Config(
+            app,
+            host=self.context.config.api.host,
+            port=self.context.config.api.port,
+        )
+        server = uvicorn.Server(config)
+        logger.info(
+            f"WebSocket server started on {self.context.config.api.host}:{self.context.config.api.port}"
+        )
+        await server.serve()
