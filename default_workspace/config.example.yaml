@@ -1,0 +1,27 @@
+# LLM provider configuration, follow https://docs.litellm.ai/docs/providers for your own provider config
+llm:
+  provider: openai              # Options: openai, anthropic, minimax, etc.
+  model: gpt-4                 # Model to use for generation, follow litellm model field
+  api_key: sk-your-openai-api-key-here  # WARNING: Replace with your actual key, never commit real keys!
+  api_base: null               # Optional: Custom API endpoint (http:// or https://)
+  temperature: 0.7
+  max_tokens: 2048
+
+default_agent: pickle
+
+# Get your API key at https://brave.com/search/api/
+# websearch:
+#   provider: brave
+#   api_key: your-brave-search-api-key
+
+# webread:
+#   provider: crawl4ai
+
+# api: {}
+
+# channels:
+#   enabled: true
+#   telegram:
+#     bot_token: your-bot-token
+#     allowed_user_ids:
+#       - "your_user_id"

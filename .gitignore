@@ -16,7 +16,7 @@ uv.lock
 pyrightconfig.json
 
 config.user.yaml
-config.*.yaml
+config.runtime.yaml
 
 # skills
 default_workspace/skills/*
@@ -24,3 +24,5 @@ default_workspace/skills/*
 .history/
 .logs/
 .event/
+
+docs/
