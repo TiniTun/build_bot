@@ -77,7 +77,7 @@ agents/<id>/AGENT.md  # YAML frontmatter (name, llm overrides, allow_skills) + s
 skills/<id>/SKILL.md  # YAML frontmatter (name, description) + skill content
 ```
 
-`Config.load(workspace_path)` resolves all relative paths (`agent_path`, `skills_path`, `history_path`) against the workspace root. Default workspace is `./default_workspace`.
+`Config.load(workspace_path)` resolves all relative paths (`agents_path`, `skills_path`, `history_path`) against the workspace root. Default workspace is `./default_workspace`.
 
 ### Known issues in `core/commands/handlers.py`
 

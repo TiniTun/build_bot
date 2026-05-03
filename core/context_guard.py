@@ -53,7 +53,7 @@ class ContextGuard:
             return state
 
         # If still over threshold, compact via summarization
-        return await self
+        return await self.compact_and_roll(state)
 
     def _compact_message_count(self, state: "SessionState") -> int:
         """Calculate how many messages to compress."""
@@ -103,11 +103,27 @@ class ContextGuard:
                 lines.append(f"{role.upper()}: {content}")
         return "\n".join(lines)
 
-    async def _compact_messages(
+    async def compact_and_roll(
         self,
         state: "SessionState",
     ) -> "SessionState":
-        """Compact history by summarizing older messages."""
+        """Compact history, roll to new session, return new messages."""
+        new_session = state.agent.new_session(state.source)
+        self.shared_context.routing_table.config_source_session_cache(
+            str(state.source), new_session.session_id
+        )
+
+        compacted_history = await self._build_compacted_messages(state)
+        for message in compacted_history:
+            new_session.state.add_message(message)
+
+        return new_session.state
+
+    async def _build_compacted_messages(
+        self,
+        state: "SessionState",
+    ) -> "SessionState":
+        """Generate summary of older messages using agent's LLM."""
         compress_count = self._compact_message_count(state)
 
         old_messages = state.messages[:compress_count]
@@ -137,7 +153,4 @@ class ContextGuard:
             }
         )
         messages.extend(state.messages[compress_count:])
-
-        # Update state in place
-        state.messages = messages
-        return state
+        return messages

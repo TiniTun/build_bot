@@ -3,6 +3,7 @@
 import logging
 import sys
 
+import litellm
 from utils.config import Config
 from logging.handlers import RotatingFileHandler
 
@@ -20,7 +21,10 @@ def setup_logging(config: Config, console_output: bool = False) -> None:
 
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)                                                     
-    logging.getLogger("litellm").setLevel(logging.WARNING)
+    logging.getLogger("litellm").setLevel(logging.ERROR)
+    logging.getLogger("LiteLLM").setLevel(logging.ERROR)
+    litellm.set_verbose = False
+
     logging.getLogger("telegram").setLevel(logging.WARNING)
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("watchdog").setLevel(logging.WARNING)

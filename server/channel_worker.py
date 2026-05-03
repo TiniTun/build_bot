@@ -58,7 +58,7 @@ class ChannelWorker(Worker):
                             "default_delivery_source", source_str_value
                         )
 
-                session_id = self._get_or_create_session_id(source)
+                session_id = self.context.routing_table.get_or_create_session_id(source)
 
                 # Publish INBOUND event with typed source
                 event = InboundEvent(

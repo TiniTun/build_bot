@@ -75,7 +75,7 @@ class Config(BaseModel):
     workspace: Path
     llm: LLMConfig
     default_agent: str
-    agent_path: Path = Field(default=Path("agents"))
+    agents_path: Path = Field(default=Path("agents"))
     skills_path: Path = Field(default=Path("skills"))
     logging_path: Path = Field(default=Path(".logs"))
     history_path: Path = Field(default=Path(".history"))
@@ -85,13 +85,17 @@ class Config(BaseModel):
     channels: ChannelConfig = Field(default_factory=ChannelConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
+    routing: dict = Field(default_factory=lambda: {"bindings": []})
     default_delivery_source: str | None = None
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
         """Resolve relative paths to absolute using workspace."""
+        if not self.workspace.is_absolute():
+            self.workspace = self.workspace.resolve()     
+
         for field_name in (
-            "agent_path",
+            "agents_path",
             "skills_path",
             "logging_path",
             "history_path",

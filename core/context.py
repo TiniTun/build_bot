@@ -1,9 +1,10 @@
 from typing import Any, TYPE_CHECKING
-import channel
+
 from channel.base import Channel
 from core.agent_loader import AgentLoader
 from core.commands.registry import CommandRegistry
 from core.history import HistoryStore
+from core.routing import RoutingTable
 from core.skill_loader import SkillLoader
 from core.eventbus import EventBus
 from utils.config import Config
@@ -20,6 +21,7 @@ class SharedContext:
     agent_loader: AgentLoader
     skill_loader: SkillLoader
     command_registry: CommandRegistry
+    routing_table: RoutingTable
     channels: list[Channel[Any]]
     eventbus: EventBus
     websocket_worker: "WebSocketWorker | None"
@@ -32,6 +34,7 @@ class SharedContext:
         self.agent_loader = AgentLoader.from_config(config)
         self.skill_loader = SkillLoader.from_config(config)
         self.command_registry = CommandRegistry.with_builtins()
+        self.routing_table = RoutingTable(self)
         
         if channels is not None:
             self.channels = channels

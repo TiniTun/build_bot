@@ -61,16 +61,24 @@ class CommandRegistry:
         """Create registry with built-in commands registered."""
         from core.commands.handlers import (
             HelpCommand,
+            AgentCommand,
             SkillsCommand,
             CompactCommand,
             ContextCommand,
+            ClearCommand,
             SessionCommand,
+            RouteCommand,
+            BindingsCommand,
         )
 
         registry = cls()
         registry.register(HelpCommand())
+        registry.register(AgentCommand())
         registry.register(SkillsCommand())
         registry.register(CompactCommand())
         registry.register(ContextCommand())
+        registry.register(ClearCommand())
         registry.register(SessionCommand())
+        registry.register(RouteCommand())
+        registry.register(BindingsCommand())
         return registry
