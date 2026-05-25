@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from dataclasses import dataclass, field
 from re import Pattern
 from typing import TYPE_CHECKING
@@ -12,6 +13,7 @@ from utils.config import SourceSessionConfig
 if TYPE_CHECKING:
     from core.context import SharedContext
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class Binding:
@@ -75,7 +77,16 @@ class RoutingTable:
 
         source_session = self.context.config.sources.get(source_str)
         if source_session:
-            return source_session.session_id
+            session_id = source_session.session_id
+            session_info = self.context.history_store.get_session_info(session_id)
+            if session_info:
+                return session_id
+            logger.warning("Stale cached session for source %s: session %s not found in history; creating new session",
+                source_str,
+                session_id,
+            )
+            self.config_source_session_cache(source_str, None)
+
 
         agent_id = self.resolve(source_str)
         agent_def = self.context.agent_loader.load(agent_id)
@@ -83,9 +94,7 @@ class RoutingTable:
         session = agent.new_session(source)
 
         # Cache the session
-        self.context.config.set_runtime(
-            f"sources.{source_str}", SourceSessionConfig(session_id=session.session_id)
-        )
+        self.config_source_session_cache(source_str, session.session_id)
 
         return session.session_id
 
@@ -98,14 +107,17 @@ class RoutingTable:
     def config_source_session_cache(
         self, source_str: str, session_id: str | None
     ) -> None:
-        """Config session cache for a source."""
+        """Set or clear source -> session affinity in memory and runtime config."""
         if session_id is None:
-            if source_str in self.context.config.sources:
-                del self.context.config.sources[source_str]
-                self.context.config.set_runtime(
-                    "sources", self.context.config.sources
-                )
+            self.context.config.sources.pop(source_str, None)
         else:
-            self.context.config.set_runtime(
-                f"""sources.{source_str}""", SourceSessionConfig(session_id=session_id)
+            self.context.config.sources[source_str] = SourceSessionConfig(
+                session_id=session_id
             )
+
+        sources_payload = {
+            source: value.model_dump()
+            for source, value in self.context.config.sources.items()
+        }
+
+        self.context.config.set_runtime("sources", sources_payload)

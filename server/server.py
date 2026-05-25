@@ -11,6 +11,7 @@ import uvicorn
 
 from .worker import Worker
 from .agent_worker import AgentWorker
+from .cron_worker import CronWorker
 from .delivery_worker import DeliveryWorker
 from .channel_worker import ChannelWorker
 from .websocket_worker import WebSocketWorker
@@ -59,6 +60,7 @@ class Server:
             self.context.eventbus,  # EventBus (active worker)
             AgentWorker(self.context),  # SubscriberWorker
             DeliveryWorker(self.context),  # SubscriberWorker
+            CronWorker(self.context),  # Background worker for scheduled tasks
             ws_worker, # WebSocketWorker (SubscriberWorker)
         ]
 

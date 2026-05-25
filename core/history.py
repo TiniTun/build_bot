@@ -209,7 +209,7 @@ class HistoryStore:
         if not session_file.exists():
             return []
         
-        messages: list[HistoryMessage] = {}
+        messages: list[HistoryMessage] = []
         with open(session_file) as f:
             for line in f:
                 line = line.strip()

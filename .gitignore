@@ -26,3 +26,5 @@ default_workspace/skills/*
 .event/
 
 docs/
+
+._*

@@ -3,6 +3,7 @@
 import logging
 from pathlib import Path
 from typing import Any, Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
@@ -77,6 +78,7 @@ class Config(BaseModel):
     default_agent: str
     agents_path: Path = Field(default=Path("agents"))
     skills_path: Path = Field(default=Path("skills"))
+    crons_path: Path = Field(default=Path("crons"))
     logging_path: Path = Field(default=Path(".logs"))
     history_path: Path = Field(default=Path(".history"))
     event_path: Path = Field(default=Path(".event"))
@@ -87,6 +89,18 @@ class Config(BaseModel):
     sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
     routing: dict = Field(default_factory=lambda: {"bindings": []})
     default_delivery_source: str | None = None
+    timezone: str | None = None
+
+    @field_validator("timezone")
+    @classmethod
+    def timezone_must_be_valid(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError as e:
+            raise ValueError(f"timezone must be a valid IANA timezone: {v}") from e
+        return v
 
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
@@ -97,6 +111,7 @@ class Config(BaseModel):
         for field_name in (
             "agents_path",
             "skills_path",
+            "crons_path",
             "logging_path",
             "history_path",
             "history_path",
@@ -184,6 +199,9 @@ class Config(BaseModel):
         """Update a runtime value in config.runtime.yaml."""
         self._set_config_value(self.workspace / "config.runtime.yaml", key, value)
 
+        if not self.reload():
+            logging.warning("Config runtime update was written, but in-memory reload failed")
+
     def reload(self) -> bool:
         """Re-read config.user.yaml and merge with runtime."""
         try:
@@ -211,7 +229,11 @@ class ConfigHandler(FileSystemEventHandler):
 
     def on_modified(self, event) -> None:
         """Reload config when config.user.yaml changes."""
-        if not event.is_directory and event.src_path.endswith("config.user.yaml"):
+        if event.is_directory:
+            return 
+        
+        path = Path(event.src_path).name
+        if path in {"config.user.yaml", "config.runtime.yaml"}:
             self._cofig.reload()
 
 

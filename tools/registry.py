@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING, Any
 
 from tools.base import BaseTool
-from tools.builtin_tools import read_file, write_file, edit_file, bash
+from tools.builtin_tools import read_file, write_file, edit_file, create_cron_job, bash
 
 if TYPE_CHECKING:
     from core.agent import AgentSession
@@ -33,12 +33,12 @@ class ToolRegistry:
         return [tool.get_tool_schema() for tool in self._tools.values()]
     
     async def execute_tool(
-            self, name: str, session: "AgentSession", **kwargs: Any
+            self, tool_name: str, session: "AgentSession", **kwargs: Any
     ) -> str:
         """Execute a tool by name."""
-        tool = self.get(name)
+        tool = self.get(tool_name)
         if tool is None:
-            raise ValueError(f"Tool not found: {name}")
+            raise ValueError(f"Tool not found: {tool_name}")
         
         return await tool.execute(session=session, **kwargs)
     
@@ -51,6 +51,7 @@ class ToolRegistry:
         registry.register(read_file)
         registry.register(write_file)
         registry.register(edit_file)
+        registry.register(create_cron_job)
         registry.register(bash)
 
         return registry

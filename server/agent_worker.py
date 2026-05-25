@@ -3,6 +3,7 @@
 import asyncio
 import logging
 from dataclasses import replace
+from typing import Union
 
 from .worker import SubscriberWorker
 from core.agent import Agent
@@ -10,6 +11,8 @@ from core.events import (
     AgentEventSource,
     InboundEvent,
     OutboundEvent,
+    DispatchEvent,
+    DispatchResultEvent,
 )
 from utils.def_loader import DefNotFoundError
 
@@ -18,6 +21,8 @@ from utils.def_loader import DefNotFoundError
 MAX_RETRIES = 3
 
 logger = logging.getLogger(__name__)
+
+ProcessableEvent = Union[InboundEvent, DispatchEvent]
 
 
 class AgentWorker(SubscriberWorker):
@@ -28,9 +33,10 @@ class AgentWorker(SubscriberWorker):
 
         # Auto-subscribe to events
         self.context.eventbus.subscribe(InboundEvent, self.dispatch_event)
-        self.logger.info("AgentWorker subscribed to InboundEvent events")
+        self.context.eventbus.subscribe(DispatchEvent, self.dispatch_event)
+        self.logger.info("AgentWorker subscribed to InboundEvent and DispatchEvent events")
 
-    async def dispatch_event(self, event: InboundEvent) -> None:
+    async def dispatch_event(self, event: ProcessableEvent) -> None:
         """Create executor task for typed event."""
         # Get agent_id from session (single source of truth)
         session_info = self.context.history_store.get_session_info(event.session_id)
@@ -49,7 +55,7 @@ class AgentWorker(SubscriberWorker):
 
         asyncio.create_task(self.exec_session(event, agent_def))
 
-    async def exec_session(self, event: InboundEvent, agent_def) -> None:
+    async def exec_session(self, event: ProcessableEvent, agent_def) -> None:
         session_id = event.session_id
 
         try:
@@ -96,17 +102,31 @@ class AgentWorker(SubscriberWorker):
 
     async def _emit_response(
         self,
-        event: InboundEvent,
+        event: ProcessableEvent,
         content: str,
         agent_id: str,
         error: str | None = None,
     ) -> None:
         """Emit response event with content."""
-
-        result_event = OutboundEvent(
-            session_id=event.session_id,
-            source=AgentEventSource(agent_id),
-            content=content,
-            error=str(error) if error else None,
-        )
+        if isinstance(event, DispatchEvent) and event.source.is_cron:
+            result_event: OutboundEvent = OutboundEvent(
+                session_id=event.session_id,
+                source=AgentEventSource(agent_id),
+                content=content,
+                error=str(error) if error else None,
+            )
+        elif isinstance(event, DispatchEvent):
+            result_event: OutboundEvent | DispatchResultEvent = DispatchResultEvent(
+                session_id=event.session_id,
+                source=AgentEventSource(agent_id),
+                content=content,
+                error=str(error) if error else None,
+            )
+        else:
+            result_event: OutboundEvent = OutboundEvent(
+                session_id=event.session_id,
+                source=AgentEventSource(agent_id),
+                content=content,
+                error=str(error) if error else None,
+            )
         await self.context.eventbus.publish(result_event)

@@ -107,6 +107,21 @@ class WebSocketEventSource(EventSource):
         return True
 
 
+@dataclass
+class CronEventSource(EventSource):
+    """Source for cron-triggered events."""
+
+    _namespace = "cron"
+    cron_id: str
+
+    def __str__(self) -> str:
+        return f"cron:{self.cron_id}"
+
+    @classmethod
+    def from_string(cls, s: str) -> "CronEventSource":
+        _, cron_id = s.split(":", 1)
+        return cls(cron_id=cron_id)
+
 
 @dataclass
 class Event:
@@ -157,10 +172,28 @@ class OutboundEvent(Event):
     error: str | None = None
 
 
+@dataclass
+class DispatchEvent(Event):
+    """Event for internal agent-to-agent delegation."""
+    
+    parent_session_id: str = ""
+    retry_count: int = 0
+
+
+@dataclass
+class DispatchResultEvent(Event):
+    """Event for result of a dispatched job."""
+
+    error: str | None = None
+
+
+
 # Registry mapping event class names to event classes
 _EVENT_CLASSES: dict[str, type[Event]] = {
     "InboundEvent": InboundEvent,
     "OutboundEvent": OutboundEvent,
+    "DispatchEvent": DispatchEvent,
+    "DispatchResultEvent": DispatchResultEvent,
 }
 
 

@@ -63,6 +63,7 @@ class CommandRegistry:
             HelpCommand,
             AgentCommand,
             SkillsCommand,
+            CronsCommand,
             CompactCommand,
             ContextCommand,
             ClearCommand,
@@ -75,6 +76,7 @@ class CommandRegistry:
         registry.register(HelpCommand())
         registry.register(AgentCommand())
         registry.register(SkillsCommand())
+        registry.register(CronsCommand())
         registry.register(CompactCommand())
         registry.register(ContextCommand())
         registry.register(ClearCommand())
