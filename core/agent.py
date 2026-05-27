@@ -23,6 +23,7 @@ from tools.registry import ToolRegistry
 from tools.skill_tool import create_skill_tool
 from tools.websearch_tool import create_websearch_tool
 from tools.webread_tool import create_webread_tool
+from tools.post_message_tool import create_post_message_tool
 
 if TYPE_CHECKING:
     from core.context import SharedContext
@@ -38,7 +39,7 @@ class Agent:
         self.context = context
         self.llm = LLMProvider.from_config(agent_def.llm)
 
-    def _build_tools(self) -> ToolRegistry:
+    def _build_tools(self, include_post_message: bool) -> ToolRegistry:
         """Build a ToolRegistry with tools appropriate for the session."""
         registry = ToolRegistry.with_builtins()
 
@@ -56,6 +57,11 @@ class Agent:
         if webread_tool:
             registry.register(webread_tool)
 
+        if include_post_message:
+            post_tool = create_post_message_tool(self.context)
+            if post_tool:
+                registry.register(post_tool)
+
         return registry
 
     def _get_token_threshold(self) -> int:
@@ -70,7 +76,9 @@ class Agent:
     ) -> "AgentSession":
         """Create a new conversation session."""
         session_id = session_id or str(uuid.uuid4())
-        tools = self._build_tools()
+
+        include_post_message = source.is_cron
+        tools = self._build_tools(include_post_message)
 
         context_guard = ContextGuard(
             shared_context=self.context,
@@ -117,7 +125,8 @@ class Agent:
         messages: list[Message] = [msg.to_message() for msg in history_messages]
 
         # Build tools for resumed session
-        tools = self._build_tools()
+        include_post_message = source.is_cron
+        tools = self._build_tools(include_post_message)
 
         # Create context guard
         context_guard = ContextGuard(
