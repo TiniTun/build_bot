@@ -10,14 +10,36 @@ from litellm.types.completion import (
     ChatCompletionToolMessageParam,
 )
 
-from core.session_state import SessionState
+
 
 if TYPE_CHECKING:
     from core.context import SharedContext
+    from core.session_state import SessionState
 
 
 # Default max size for tool result content before truncation
 MAX_TOOL_RESULT_CHARS = 10000
+
+COMPACT_PROMPT = """Your task is to create a detailed summary of the conversation so far, capturing the user's requests, your actions, and any important context needed to continue without losing information.
+
+Your summary should include the following sections:
+
+1. Primary Request and Intent: What did the user explicitly ask for? Capture the full scope of their request.
+
+2. Key Facts and User Preferences: Important information exchanged, decisions made, and user preferences or constraints discovered during the conversation.
+
+3. User Messages: List ALL user messages that are not tool results. These are critical for understanding the user's feedback and changing intent.
+
+4. Errors and Corrections: Any mistakes made, how they were fixed, and especially any corrections or feedback from the user about doing things differently.
+
+5. Current Work and Pending Tasks: What was being worked on immediately before this summary, and what tasks remain unfinished.
+
+Here is the conversation to summarize:
+
+{conversation}
+
+Please provide your summary following this structure. Be precise and thorough — the next response will only have access to this summary, not the original messages."""
+
 
 @dataclass
 class ContextGuard:
@@ -55,7 +77,7 @@ class ContextGuard:
         # If still over threshold, compact via summarization
         return await self.compact_and_roll(state)
 
-    def _compact_message_count(self, state: "SessionState") -> int:
+    def _compress_message_count(self, state: "SessionState") -> int:
         """Calculate how many messages to compress."""
         keep_count = max(4, int(len(state.messages) * 0.2))
         compress_count = max(2, int(len(state.messages) * 0.5))
@@ -124,14 +146,12 @@ class ContextGuard:
         state: "SessionState",
     ) -> "SessionState":
         """Generate summary of older messages using agent's LLM."""
-        compress_count = self._compact_message_count(state)
+        compress_count = self._compress_message_count(state)
 
         old_messages = state.messages[:compress_count]
         old_text = self._serialize_messages_for_summary(old_messages)
 
-        summary_prompt = f"""Summarize the conversation so far. Keep it factual and concise. Focus on key decisions, facts, and user preferences discovered:
-
-{old_text}"""
+        summary_prompt = COMPACT_PROMPT.format(conversation=old_text)
 
         response, _ = await state.agent.llm.chat(
             [{"role": "user", "content": summary_prompt}],

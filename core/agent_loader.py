@@ -83,7 +83,7 @@ class AgentLoader:
     def _load_soul_md(self, agent_id: str) -> str:
         """Load SOUL.md file for an agent if it exists."""
         soul_path: Path = self.config.agents_path / agent_id / "SOUL.md"
-        if soul_path.exists:
+        if soul_path.exists():
             return soul_path.read_text().strip()
         return ""
 

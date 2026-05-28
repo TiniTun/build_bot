@@ -25,6 +25,7 @@ default_workspace/skills/*
 .logs/
 .event/
 memories/
+crons/
 
 docs/
 

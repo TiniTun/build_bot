@@ -53,7 +53,7 @@ class CompactCommand(Command):
 
     async def execute(self, args: str, session: "AgentSession") -> str:
         # Force compaction regardless of threshold
-        await session.context_guard._compact_messages(session.state)
+        await session.context_guard._build_compacted_messages(session.state)
         msg_count = len(session.state.messages)
         return f"✓ Context compacted. {msg_count} messages retained."
 
@@ -83,7 +83,7 @@ class ClearCommand(Command):
     description = "Clear conversation and start fresh"
 
     async def execute(self, args: str, session: "AgentSession") -> str:
-        source_str = str(session.source)
+        source_str = str(session.state.source)
 
         session.shared_context.routing_table.config_source_session_cache(source_str, None)
 

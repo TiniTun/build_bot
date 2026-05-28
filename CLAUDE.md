@@ -79,9 +79,7 @@ skills/<id>/SKILL.md  # YAML frontmatter (name, description) + skill content
 
 `Config.load(workspace_path)` resolves all relative paths (`agents_path`, `skills_path`, `history_path`) against the workspace root. Default workspace is `./default_workspace`.
 
-### Known issues in `core/commands/handlers.py`
+### Slash-command handler notes
 
-Several handlers access attributes that don't exist on `AgentSession`:
-- `session.command_registry` → should be `session.shared_context.command_registry`
-- `session.agent.history_store` → should be `session.shared_context.history_store`
-- `session.agent.skill_loader` → should be `session.shared_context.skill_loader`
+- Handlers should access shared services via `session.shared_context`, not directly on `session` or `session.agent`.
+- `AgentLoader.load()` raises `DefNotFoundError` for missing agents; `/agent <id>` and `/route <pattern> <agent_id>` should catch that instead of `ValueError`.
