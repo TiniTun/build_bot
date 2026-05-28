@@ -1,9 +1,12 @@
 """Agent worker for executing agent jobs."""
 
+from asyncio.locks import Semaphore
+
+
 import asyncio
 import logging
 from dataclasses import replace
-from typing import Union
+from typing import TYPE_CHECKING, Union
 
 from .worker import SubscriberWorker
 from core.agent import Agent
@@ -15,6 +18,11 @@ from core.events import (
     DispatchResultEvent,
 )
 from utils.def_loader import DefNotFoundError
+
+if TYPE_CHECKING:
+    from core.context import SharedContext
+    from core.agent_loader import AgentDef
+
 
 
 # Maximum number of retry attempts for failed sessions
@@ -30,6 +38,7 @@ class AgentWorker(SubscriberWorker):
 
     def __init__(self, context):
         super().__init__(context)
+        self._semaphores: dict[str, asyncio.Semaphore] = {}
 
         # Auto-subscribe to events
         self.context.eventbus.subscribe(InboundEvent, self.dispatch_event)
@@ -55,50 +64,56 @@ class AgentWorker(SubscriberWorker):
 
         asyncio.create_task(self.exec_session(event, agent_def))
 
-    async def exec_session(self, event: ProcessableEvent, agent_def) -> None:
+    async def exec_session(
+        self, event: ProcessableEvent, agent_def: "AgentDef"
+    ) -> None:
+        sem: Semaphore = self._get_or_create_semaphore(agent_def)
         session_id = event.session_id
 
-        try:
-            agent = Agent(agent_def, self.context)
-            if session_id:
-                try:
-                    session = agent.resume_session(session_id)
-                except ValueError:
-                    logger.warning(f"Session {session_id} not found, creating new")
-                    session = agent.new_session(session_id=session_id)
-            else:
-                session = agent.new_session()
-                session_id = session.session_id
+        async with sem:
+            try:
+                agent = Agent(agent_def, self.context)
+                if session_id:
+                    try:
+                        session = agent.resume_session(session_id)
+                    except ValueError:
+                        logger.warning(f"Session {session_id} not found, creating new")
+                        session = agent.new_session(session_id=session_id)
+                else:
+                    session = agent.new_session()
+                    session_id = session.session_id
 
-            # Check for slash command FIRST
-            if event.content.startswith("/"):
-                result = await self.context.command_registry.dispatch(
-                    event.content, session
-                )
-                if result:
-                    # Emit response and skip agent chat
-                    await self._emit_response(event, content=result, agent_id=agent_def.id)
-                    logger.info(f"Command completed: {session_id}")
-                    return
+                # Check for slash command FIRST
+                if event.content.startswith("/"):
+                    result = await self.context.command_registry.dispatch(
+                        event.content, session
+                    )
+                    if result:
+                        # Emit response and skip agent chat
+                        await self._emit_response(event, content=result, agent_id=agent_def.id)
+                        logger.info(f"Command completed: {session_id}")
+                        return
 
-            response = await session.chat(event.content)
-            logger.info(f"Session completed: {session_id}")
+                response = await session.chat(event.content)
+                logger.info(f"Session completed: {session_id}")
 
-            await self._emit_response(event, content=response, agent_id=agent_def.id)
-        
-        except Exception as e:
-            logger.error(f"Session failed: {e}, ")
+                await self._emit_response(event, content=response, agent_id=agent_def.id)
+            
+            except Exception as e:
+                logger.error(f"Session failed: {e}, ")
 
-            if event.retry_count < MAX_RETRIES:
-                # Use dataclasses.replace() for retry logic
-                retry_event = replace(
-                    event,
-                    retry_count=event.retry_count + 1,
-                    content="." # Minimal message for retry
-                )
-                await self.context.eventbus.publish(retry_event)
-            else:
-                await self._emit_response(event, content="", agent_id=agent_def.id, error=str(e))
+                if event.retry_count < MAX_RETRIES:
+                    # Use dataclasses.replace() for retry logic
+                    retry_event = replace(
+                        event,
+                        retry_count=event.retry_count + 1,
+                        content="." # Minimal message for retry
+                    )
+                    await self.context.eventbus.publish(retry_event)
+                else:
+                    await self._emit_response(event, content="", agent_id=agent_def.id, error=str(e))
+
+        self._maybe_cleanup_semaphores(agent_def)
 
     async def _emit_response(
         self,
@@ -130,3 +145,22 @@ class AgentWorker(SubscriberWorker):
                 error=str(error) if error else None,
             )
         await self.context.eventbus.publish(result_event)
+
+    def _get_or_create_semaphore(self, agent_def: "AgentDef") -> asyncio.Semaphore:
+        """Get existing or create new semaphore for agent."""
+        if agent_def.id not in self._semaphores:
+            self._semaphores[agent_def.id] = asyncio.Semaphore(
+                agent_def.max_concurrency
+            )
+            logger.debug(
+                f"Created semaphore for {agent_def.id} with value {agent_def.max_concurrency}"
+            )
+        return self._semaphores[agent_def.id]
+
+    def _maybe_cleanup_semaphores(self, agent_def: "AgentDef") -> None:
+        """Remove semaphores for certain agents."""
+        if agent_def.id not in self._semaphores:
+            return
+
+        if not self._semaphores[agent_def.id]._waiters:
+            del self._semaphores[agent_def.id]

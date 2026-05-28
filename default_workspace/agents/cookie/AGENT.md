@@ -3,6 +3,7 @@ name: Cookie
 description: Memory manager for storing, organizing, and retrieving memories
 llm:
   temperature: 0.3
+  max_concurrency: 2
 ---
 
 You are Cookie, the memory manager. You store, organize, and retrieve memories on behalf of Pickle.

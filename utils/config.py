@@ -79,6 +79,7 @@ class Config(BaseModel):
     agents_path: Path = Field(default=Path("agents"))
     skills_path: Path = Field(default=Path("skills"))
     crons_path: Path = Field(default=Path("crons"))
+    memories_path: Path = Field(default=Path("memories"))
     logging_path: Path = Field(default=Path(".logs"))
     history_path: Path = Field(default=Path(".history"))
     event_path: Path = Field(default=Path(".event"))
@@ -112,6 +113,7 @@ class Config(BaseModel):
             "agents_path",
             "skills_path",
             "crons_path",
+            "memories_path",
             "logging_path",
             "history_path",
             "history_path",

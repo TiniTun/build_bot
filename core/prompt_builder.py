@@ -64,7 +64,7 @@ class PromptBuilder:
             "{{workspace}}": str(cfg.workspace),
             "{{skills_path}}": str(cfg.skills_path),
             "{{crons_path}}": str(cfg.crons_path),
-            #"{{memories_path}}": str(cfg.memories_path),
+            "{{memories_path}}": str(cfg.memories_path),
             "{{agents_path}}": str(cfg.agents_path),
         }
         for placeholder, value in replacements.items():
