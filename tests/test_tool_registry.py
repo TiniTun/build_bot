@@ -35,3 +35,13 @@ class ToolRegistryTests(unittest.IsolatedAsyncioTestCase):
         required = schema["function"]["parameters"]["required"]
 
         self.assertIn("name", required)
+
+    def test_with_builtins_registers_core_tools(self) -> None:
+        registry = ToolRegistry.with_builtins()
+
+        tool_names = {tool.name for tool in registry.list_all()}
+
+        self.assertEqual(
+            tool_names,
+            {"read", "write", "edit", "create_cron_job", "bash"},
+        )

@@ -15,17 +15,20 @@ uv.lock
 *.code-workspace
 pyrightconfig.json
 
-config.user.yaml
-config.runtime.yaml
+*.local.toml
+*.local.json
 
+# default_workspace/
+
+default_workspace/config.user.yaml
+default_workspace/config.runtime.yaml
 # skills
 default_workspace/skills/*
-
-.history/
-.logs/
-.event/
-memories/
-crons/
+default_workspace/.history/
+default_workspace/.logs/
+default_workspace/.event/
+default_workspace/memories/
+default_workspace/crons/
 
 docs/
 
