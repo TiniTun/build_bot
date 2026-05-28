@@ -152,6 +152,16 @@ class DeliveryWorker(SubscriberWorker):
     async def handle_event(self, event: OutboundEvent) -> None:
         """Handle an outbound message event."""
         try:
+            if not event.content.strip():
+                if event.error:
+                    event.content = f"Error: {event.error}"
+                else:
+                    self.logger.info(
+                        f"Skipped empty outbound message for session {event.session_id}"
+                    )
+                    self.context.eventbus.ack(event)
+                    return
+
             session_info = self._get_session_source(event.session_id)
 
             if not session_info or not session_info.source:

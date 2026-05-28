@@ -124,6 +124,12 @@ class AgentWorker(SubscriberWorker):
     ) -> None:
         """Emit response event with content."""
         if isinstance(event, DispatchEvent) and event.source.is_cron:
+            if not content.strip() and not error:
+                logger.debug(
+                    f"Cron job {event.source} produced no final response; skipping outbound event"
+                )
+                return
+
             result_event: OutboundEvent = OutboundEvent(
                 session_id=event.session_id,
                 source=AgentEventSource(agent_id),

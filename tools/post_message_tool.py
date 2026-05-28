@@ -40,6 +40,10 @@ def create_post_message_tool(context: "SharedContext") -> BaseTool | None:
     )
     async def post_message(content: str, session: "AgentSession") -> str:
         """Send a message to the default user on the default platform."""
+        content = content.strip()
+        if not content:
+            return "Error: message content is empty"
+
         try:
             # Publish OUTBOUND event for the DeliveryWorker to handle
             event = OutboundEvent(
