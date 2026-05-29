@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from core.cron_loader import CronDef
-from tools.base import tool
+from tools.base import ToolErrorCode, ToolResult, tool
 
 if TYPE_CHECKING:
     from core.agent import AgentSession
@@ -35,13 +35,29 @@ async def read_file(path: str, session: "AgentSession") -> str:
     try:
         return Path(path).read_text()
     except FileNotFoundError:
-        return f"Error: File not found: {path}"
+        return ToolResult.error(
+            ToolErrorCode.NOT_FOUND,
+            f"File not found: {path}",
+            user_action="Check the path and try again.",
+        )
     except PermissionError:
-        return f"Error: Permission denied reading: {path}"
+        return ToolResult.error(
+            ToolErrorCode.PERMISSION_DENIED,
+            f"Permission denied reading: {path}",
+            user_action="Choose a readable file or grant access.",
+        )
     except IsADirectoryError:
-        return f"Error: Path is a directory, not a file: {path}"
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            f"Path is a directory, not a file: {path}",
+            user_action="Provide a file path.",
+        )
     except Exception as e:
-        return f"Error reading file: {e}"
+        return ToolResult.error(
+            ToolErrorCode.PROVIDER_ERROR,
+            f"Error reading file: {e}",
+            retryable=True,
+        )
     
 @tool(
     name="write",
@@ -64,11 +80,23 @@ async def write_file(path: str, content: str, session: "AgentSession") -> str:
         Path(path).write_text(content)
         return f"Successfully wrote to: {path}"
     except PermissionError:
-        return f"Error: Permission denied writing to: {path}"
+        return ToolResult.error(
+            ToolErrorCode.PERMISSION_DENIED,
+            f"Permission denied writing to: {path}",
+            user_action="Choose a writable path or grant access.",
+        )
     except IsADirectoryError:
-        return f"Error: Path is a directory, not a file: {path}"
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            f"Path is a directory, not a file: {path}",
+            user_action="Provide a file path.",
+        )
     except Exception as e:
-        return f"Error writing file: {e}"
+        return ToolResult.error(
+            ToolErrorCode.PROVIDER_ERROR,
+            f"Error writing file: {e}",
+            retryable=True,
+        )
     
 @tool(
     name="edit",
@@ -93,16 +121,32 @@ async def edit_file(
     try:
         content = Path(path).read_text()
         if old_text not in content:
-            return f"Error: '{old_text}' not found in {path}"
+            return ToolResult.error(
+                ToolErrorCode.NOT_FOUND,
+                f"Text to replace was not found in {path}",
+                user_action="Read the file first and retry with an exact old_text.",
+            )
         new_content = content.replace(old_text, new_text)
         Path(path).write_text(new_content)
         return f"Successfully edited {path}"
     except FileNotFoundError:
-        return f"Error: File not found: {path}"
+        return ToolResult.error(
+            ToolErrorCode.NOT_FOUND,
+            f"File not found: {path}",
+            user_action="Check the path and try again.",
+        )
     except PermissionError:
-        return f"Error: Permission denied editing: {path}"
+        return ToolResult.error(
+            ToolErrorCode.PERMISSION_DENIED,
+            f"Permission denied editing: {path}",
+            user_action="Choose a writable file or grant access.",
+        )
     except Exception as e:
-        return f"Error editing file: {e}"
+        return ToolResult.error(
+            ToolErrorCode.PROVIDER_ERROR,
+            f"Error editing file: {e}",
+            retryable=True,
+        )
 
 
 # Cron tools
@@ -217,11 +261,19 @@ async def create_cron_job(
     try:
         session.shared_context.agent_loader.load(agent)
     except Exception as e:
-        return f"Error: Agent not found: {agent}: {e}"
+        return ToolResult.error(
+            ToolErrorCode.NOT_FOUND,
+            f"Agent not found: {agent}: {e}",
+            user_action="Choose an existing agent.",
+        )
 
     display_name = name or title
     if not display_name:
-        return "Error: name is required"
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            "name is required",
+            user_action="Retry with a human-readable name.",
+        )
 
     cron_id = _safe_cron_id(cron_id or display_name)
     crons_path = session.shared_context.config.crons_path.resolve()
@@ -231,22 +283,40 @@ async def create_cron_job(
     try:
         cron_file.relative_to(crons_path)
     except ValueError:
-        return f"Error: Invalid cron_id outside crons path: {cron_id}"
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            f"Invalid cron_id outside crons path: {cron_id}",
+            user_action="Use a simple filesystem-safe cron_id.",
+        )
 
     if job_dir.exists():
-        return f"Error: Cron job already exists: {cron_id}"
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            f"Cron job already exists: {cron_id}",
+            user_action="Choose a different name or cron_id.",
+        )
 
     timezone = timezone or session.shared_context.config.timezone
     if one_off and run_at:
         try:
             schedule = _one_off_schedule(run_at, timezone)
         except Exception as e:
-            return f"Error: Invalid run_at: {e}"
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                f"Invalid run_at: {e}",
+                user_action="Use an ISO datetime, preferably with a UTC offset.",
+            )
 
     if not schedule:
         if one_off:
-            return "Error: run_at or schedule is required for one-off cron jobs"
-        return "Error: schedule is required for recurring cron jobs"
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                "run_at or schedule is required for one-off cron jobs",
+            )
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            "schedule is required for recurring cron jobs",
+        )
 
     try:
         CronDef(
@@ -259,7 +329,11 @@ async def create_cron_job(
             one_off=one_off,
         )
     except Exception as e:
-        return f"Error: Invalid cron job: {e}"
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            f"Invalid cron job: {e}",
+            user_action="Retry with a valid cron schedule and non-empty prompt.",
+        )
 
     frontmatter = {
         "name": display_name,
@@ -280,7 +354,11 @@ async def create_cron_job(
         cron_file.write_text(content)
         session.shared_context.cron_loader.load(cron_id)
     except Exception as e:
-        return f"Error creating cron job: {e}"
+        return ToolResult.error(
+            ToolErrorCode.PROVIDER_ERROR,
+            f"Error creating cron job: {e}",
+            retryable=True,
+        )
 
     return f"Created cron job `{cron_id}` at {cron_file}"
 
@@ -314,4 +392,8 @@ async def bash(command: str, session: "AgentSession") -> str:
             return f"{output}\n{error}"
         return output or error or "Command completed with no output"
     except Exception as e:
-        return f"Error executing command: {e}"
+        return ToolResult.error(
+            ToolErrorCode.PROVIDER_ERROR,
+            f"Error executing command: {e}",
+            retryable=True,
+        )

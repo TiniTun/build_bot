@@ -2,7 +2,7 @@
 
 from typing import TYPE_CHECKING, Any
 
-from tools.base import BaseTool
+from tools.base import BaseTool, ToolErrorCode, ToolResult
 from tools.builtin_tools import read_file, write_file, edit_file, create_cron_job, bash
 
 if TYPE_CHECKING:
@@ -38,9 +38,25 @@ class ToolRegistry:
         """Execute a tool by name."""
         tool = self.get(tool_name)
         if tool is None:
-            raise ValueError(f"Tool not found: {tool_name}")
+            return ToolResult.error(
+                ToolErrorCode.NOT_FOUND,
+                f"Tool not found: {tool_name}",
+            ).to_tool_content()
         
-        return await tool.execute(session=session, **kwargs)
+        try:
+            return await tool.execute(session=session, **kwargs)
+        except TypeError as e:
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                f"Invalid arguments for tool {tool_name}: {e}",
+                user_action="Retry the tool call with arguments matching its schema.",
+            ).to_tool_content()
+        except Exception as e:
+            return ToolResult.error(
+                ToolErrorCode.PROVIDER_ERROR,
+                f"Tool {tool_name} failed: {e}",
+                retryable=True,
+            ).to_tool_content()
     
     @classmethod
     def with_builtins(cls) -> "ToolRegistry":
