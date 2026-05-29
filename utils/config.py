@@ -70,6 +70,31 @@ class ApiConfig(BaseModel):
     port: int = Field(default=8005, gt=0, lt=65536)
 
 
+class ToolsConfig(BaseModel):
+    """Capability policy for the tool registry.
+
+    Absent from config => no policy is applied and current behavior is preserved.
+    """
+
+    enabled_capabilities: list[str] = Field(default_factory=list)
+    # risk level (read/draft/confirm_required/write) -> allow/deny/require_confirmation
+    risk_policy: dict[str, str] = Field(default_factory=dict)
+
+
+class ExternalProviderConfig(BaseModel):
+    """Configuration for a single external provider domain (email/calendar)."""
+
+    provider: str | None = None
+    enabled: bool = False
+
+
+class ExternalToolsConfig(BaseModel):
+    """External provider toggles. Disabled by default."""
+
+    email: ExternalProviderConfig = Field(default_factory=ExternalProviderConfig)
+    calendar: ExternalProviderConfig = Field(default_factory=ExternalProviderConfig)
+
+
 class Config(BaseModel):
     """Main configuration"""
 
@@ -87,6 +112,8 @@ class Config(BaseModel):
     webread:Crawl4AIWebReadConfig | None = None
     channels: ChannelConfig = Field(default_factory=ChannelConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
+    tools: ToolsConfig | None = None
+    external_tools: ExternalToolsConfig = Field(default_factory=ExternalToolsConfig)
     sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
     routing: dict = Field(default_factory=lambda: {"bindings": []})
     default_delivery_source: str | None = None

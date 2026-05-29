@@ -8,6 +8,7 @@ from rich.console import Console
 
 from cli.chat import chat_command
 from cli.server import server_command
+from core.skill_loader import SkillLoader
 from utils.config import Config
 
 app = typer.Typer(
@@ -74,6 +75,32 @@ def chat(
 def server(ctx: typer.Context) -> None:
     """Start the 24/7 server for cron and messagebus execution."""
     server_command(ctx)
+
+
+@app.command("validate-skills")
+def validate_skills(ctx: typer.Context) -> None:
+    """Validate every SKILL.md in the workspace against the Skills v2 contract."""
+    cfg: Config = ctx.obj["config"]
+    results = SkillLoader.from_config(cfg).validate_skills()
+
+    if not results:
+        console.print("[yellow]No skills found.[/yellow]")
+        return
+
+    has_errors = False
+    for result in results:
+        if result.ok:
+            console.print(f"[green]✓[/green] {result.id}")
+            continue
+
+        has_errors = True
+        console.print(f"[red]✗[/red] {result.id}")
+        for error in result.errors:
+            console.print(f"    - {error}")
+
+    if has_errors:
+        raise typer.Exit(1)
+    console.print("\n[green]All skills valid.[/green]")
 
 
 if __name__ == "__main__":

@@ -70,6 +70,8 @@ class CommandRegistry:
             SessionCommand,
             RouteCommand,
             BindingsCommand,
+            ConfirmCommand,
+            RejectCommand,
         )
 
         registry = cls()
@@ -83,4 +85,6 @@ class CommandRegistry:
         registry.register(SessionCommand())
         registry.register(RouteCommand())
         registry.register(BindingsCommand())
+        registry.register(ConfirmCommand())
+        registry.register(RejectCommand())
         return registry

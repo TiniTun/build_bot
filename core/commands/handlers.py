@@ -4,6 +4,9 @@ import re
 from typing import TYPE_CHECKING
 
 from core.commands.base import Command
+from core.pending_actions import PendingActionStore
+from tools.capabilities import ToolPolicy
+from tools.capability_catalog import build_capability_registry
 from utils.def_loader import DefNotFoundError
 
 if TYPE_CHECKING:
@@ -145,9 +148,11 @@ class SkillsCommand(Command):
             lines = ["**Skills:**"]
             for skill in skills:
                 lines.append(f"- `{skill.id}`: {skill.description}")
+                if skill.when_to_use:
+                    lines.append(f"  - _when:_ {'; '.join(skill.when_to_use)}")
             return "\n".join(lines)
 
-        # Show specific skill details
+        # Show specific skill details (full contract, no reference/script contents)
         skill_id = args.strip()
         try:
             skill = session.shared_context.skill_loader.load_skill(skill_id)
@@ -158,8 +163,28 @@ class SkillsCommand(Command):
             f"**Skill:** `{skill.id}`",
             f"**Name:** {skill.name}",
             f"**Description:** {skill.description}",
-            f"\n---\n\n**SKILL.md:**\n```\n{skill.content}\n```",
+            "**When to use:**",
         ]
+        lines.extend(f"- {trigger}" for trigger in skill.when_to_use)
+
+        if skill.required_tools:
+            lines.append(f"**Required tools:** {', '.join(skill.required_tools)}")
+        if skill.permissions:
+            lines.append(f"**Permissions:** `{skill.permissions}`")
+        if skill.references:
+            lines.append("**References:**")
+            lines.extend(
+                f"- `{ref.path}` — {ref.description} (load {ref.when_to_load})"
+                for ref in skill.references
+            )
+        if skill.scripts:
+            lines.append("**Scripts:**")
+            lines.extend(
+                f"- `{s.path}` — {s.description} (run {s.when_to_run})"
+                for s in skill.scripts
+            )
+
+        lines.append(f"\n---\n\n**SKILL.md:**\n```\n{skill.content}\n```")
         return "\n".join(lines)
 
 
@@ -245,3 +270,65 @@ class BindingsCommand(Command):
             lines.append(f"- `{binding['value']}` → `{binding['agent']}`")
 
         return "\n".join(lines)
+
+
+class ConfirmCommand(Command):
+    """Confirm a pending confirmation-required action."""
+
+    name = "confirm"
+    description = "Confirm a pending action by id (/confirm <action_id>)"
+
+    async def execute(self, args: str, session: "AgentSession") -> str:
+        action_id = args.strip()
+        if not action_id:
+            return "**Usage:** `/confirm <action_id>`"
+
+        store = PendingActionStore(session.shared_context.config)
+        action = store.get(action_id)
+        if action is None:
+            return f"✗ Pending action `{action_id}` not found."
+
+        capabilities = build_capability_registry(
+            session.agent.agent_def,
+            session.shared_context,
+            include_post_message=session.state.source.is_cron,
+        )
+        capability = next(
+            (
+                cap
+                for cap in capabilities.capabilities()
+                if cap.id == action["capability_id"]
+            ),
+            None,
+        )
+        if capability is None:
+            return f"✗ Capability `{action['capability_id']}` is not available."
+
+        payload = action.get("payload", {})
+        if not isinstance(payload, dict):
+            return f"✗ Pending action `{action_id}` has an invalid payload."
+
+        registry = capabilities.build_tool_registry(ToolPolicy.permissive())
+        store.delete(action_id)
+        result = await registry.execute_tool(capability.tool_name, session, **payload)
+        return (
+            f"✓ Confirmed `{action['capability_id']}` — {action['summary']}.\n"
+            f"{result}"
+        )
+
+
+class RejectCommand(Command):
+    """Discard a pending confirmation-required action."""
+
+    name = "reject"
+    description = "Reject a pending action by id (/reject <action_id>)"
+
+    async def execute(self, args: str, session: "AgentSession") -> str:
+        action_id = args.strip()
+        if not action_id:
+            return "**Usage:** `/reject <action_id>`"
+
+        store = PendingActionStore(session.shared_context.config)
+        if not store.delete(action_id):
+            return f"✗ Pending action `{action_id}` not found."
+        return f"✓ Rejected and discarded pending action `{action_id}`."

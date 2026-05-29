@@ -20,11 +20,8 @@ from core.session_state import SessionState
 from core.events import EventSource
 from provider.llm import LLMProvider
 from tools.registry import ToolRegistry
-from tools.skill_tool import create_skill_tool
-from tools.websearch_tool import create_websearch_tool
-from tools.webread_tool import create_webread_tool
-from tools.post_message_tool import create_post_message_tool
-from tools.subagent_tool import create_subagent_dispatch_tool
+from tools.capabilities import ToolPolicy
+from tools.capability_catalog import build_capability_registry
 
 if TYPE_CHECKING:
     from core.context import SharedContext
@@ -41,36 +38,17 @@ class Agent:
         self.llm = LLMProvider.from_config(agent_def.llm)
 
     def _build_tools(self, include_post_message: bool) -> ToolRegistry:
-        """Build a ToolRegistry with tools appropriate for the session."""
-        registry = ToolRegistry.with_builtins()
+        """Build a ToolRegistry with tools appropriate for the session.
 
-        if self.agent_def.allow_skills:
-            skill_tool = create_skill_tool(self.context.skill_loader)
-            if skill_tool:
-                registry.register(skill_tool)
-
-        # Add web tools if configured
-        websearch_tool = create_websearch_tool(self.context.config)
-        if websearch_tool:
-            registry.register(websearch_tool)
-
-        webread_tool = create_webread_tool(self.context.config)
-        if webread_tool:
-            registry.register(webread_tool)
-
-        if include_post_message:
-            post_tool = create_post_message_tool(self.context)
-            if post_tool:
-                registry.register(post_tool)
-
-        # Register subagent dispatch tool
-        subagent_tool = create_subagent_dispatch_tool(
-            self.agent_def.id, self.context
+        Tools are assembled as capabilities and filtered by the configured
+        ``ToolPolicy``. With no ``tools`` config the policy is permissive, so the
+        resulting tool set matches legacy behavior.
+        """
+        capabilities = build_capability_registry(
+            self.agent_def, self.context, include_post_message
         )
-        if subagent_tool:
-            registry.register(subagent_tool)
-
-        return registry
+        policy = ToolPolicy.from_config(self.context.config)
+        return capabilities.build_tool_registry(policy)
 
     def _get_token_threshold(self) -> int:
         """Get token threshold based on model's context window."""

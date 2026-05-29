@@ -46,16 +46,55 @@ class ToolError:
 
 
 @dataclass(frozen=True)
+class PendingAction:
+    """A confirmation-required action that has not been executed yet."""
+
+    id: str
+    capability_id: str
+    summary: str
+    payload: dict[str, Any]
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "capability_id": self.capability_id,
+            "summary": self.summary,
+            "payload": self.payload,
+        }
+
+
+@dataclass(frozen=True)
 class ToolResult:
     """Normalized result returned to the LLM after a tool call."""
 
     ok: bool
     content: str = ""
     error_value: ToolError | None = None
+    pending_action: PendingAction | None = None
 
     @classmethod
     def success(cls, content: str) -> "ToolResult":
         return cls(ok=True, content=content)
+
+    @classmethod
+    def requires_confirmation(
+        cls,
+        *,
+        action_id: str,
+        capability_id: str,
+        summary: str,
+        payload: dict[str, Any],
+    ) -> "ToolResult":
+        """A result indicating the action needs user confirmation before it runs."""
+        return cls(
+            ok=False,
+            pending_action=PendingAction(
+                id=action_id,
+                capability_id=capability_id,
+                summary=summary,
+                payload=payload,
+            ),
+        )
 
     @classmethod
     def error(
@@ -81,6 +120,15 @@ class ToolResult:
     def to_tool_content(self) -> str:
         if self.ok:
             return self.content
+        if self.pending_action is not None:
+            return json.dumps(
+                {
+                    "ok": False,
+                    "requires_confirmation": True,
+                    "action": self.pending_action.to_payload(),
+                },
+                sort_keys=True,
+            )
         if self.error_value is None:
             raise ValueError("ToolResult error is missing error_value")
         return json.dumps(
