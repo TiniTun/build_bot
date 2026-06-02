@@ -46,12 +46,29 @@ class LLMConfig(BaseModel):
         return v
 
 
+class TelegramVoiceConfig(BaseModel):
+    """Telegram voice-message transcription configuration.
+
+    ``api_key`` may be null; the channel falls back to ``llm.api_key`` only when
+    ``provider`` is ``openai``. Limits guard cost and latency before download.
+    """
+
+    enabled: bool = False
+    provider: Literal["openai"] = "openai"
+    model: str = "gpt-4o-mini-transcribe"
+    api_key: str | None = None
+    max_file_size_mb: int = Field(default=20, gt=0)
+    max_duration_seconds: int = Field(default=300, gt=0)
+    request_timeout_seconds: int = Field(default=60, gt=0)
+
+
 class TelegramConfig(BaseModel):
     """Telegram platform configuration."""
 
     enabled: bool = True
     bot_token: str
     allowed_user_ids: list[str] = Field(default_factory=list)
+    voice: TelegramVoiceConfig = Field(default_factory=TelegramVoiceConfig)
 
 
 class BraveWebSearchConfig(BaseModel):

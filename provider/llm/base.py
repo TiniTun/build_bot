@@ -3,11 +3,16 @@
 from dataclasses import dataclass
 from typing import Any, Optional, cast
 
+import litellm
 from litellm import acompletion, Choices, TYPE_CHECKING
 from litellm.types.completion import ChatCompletionMessageParam as Message
 
 if TYPE_CHECKING:
     from utils.config import LLMConfig
+
+# Drop params a given model does not support (e.g. gpt-5 rejects temperature!=1)
+# instead of erroring, so a single config works across heterogeneous models.
+litellm.drop_params = True
 
 
 @dataclass

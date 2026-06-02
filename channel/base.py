@@ -48,6 +48,19 @@ class Channel(ABC, Generic[T]):
         channels: list["Channel[Any]"] = []
         channel_config = config.channels
         if channel_config.telegram and channel_config.telegram.enabled:
-            channels.append(TelegramChannel(channel_config.telegram))
+            telegram = channel_config.telegram
+            transcriber = None
+            voice = telegram.voice
+            if voice.enabled and voice.provider == "openai":
+                # Lazy import keeps the openai SDK optional unless voice is on.
+                from provider.audio.openai_transcriber import OpenAITranscriber
+
+                api_key = voice.api_key or config.llm.api_key
+                transcriber = OpenAITranscriber(
+                    api_key=api_key,
+                    model=voice.model,
+                    request_timeout_seconds=voice.request_timeout_seconds,
+                )
+            channels.append(TelegramChannel(telegram, transcriber=transcriber))
 
         return channels

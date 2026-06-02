@@ -37,3 +37,14 @@ default_agent: pickle
 #     bot_token: your-bot-token
 #     allowed_user_ids:
 #       - "your_user_id"
+#     # Voice messages: transcribe Telegram voice notes to text before they
+#     # enter the agent. Requires the `ffmpeg` binary on PATH (e.g.
+#     # `apt install ffmpeg`) plus the OpenAI Python SDK.
+#     voice:
+#       enabled: false                  # default off; set true to accept voice
+#       provider: openai                # only "openai" is supported
+#       model: gpt-4o-mini-transcribe   # OpenAI speech-to-text model
+#       api_key: null                   # null reuses llm.api_key for provider=openai
+#       max_file_size_mb: 20            # reject larger voice files (OpenAI upload cap)
+#       max_duration_seconds: 300       # reject longer voice notes before download
+#       request_timeout_seconds: 60     # transcription request timeout
