@@ -12,7 +12,13 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
 class LLMConfig(BaseModel):
-    """LLM configuration."""
+    """LLM configuration.
+
+    ``provider`` is a free-form label; actual routing is handled by LiteLLM
+    based on ``model``. Use the LiteLLM model format, e.g. ``gpt-4`` for an
+    OpenAI-compatible model or ``anthropic/claude-opus-4.8`` for Anthropic.
+    ``extra`` carries provider-specific parameters passed verbatim to LiteLLM.
+    """
 
     provider: str
     model: str
@@ -20,6 +26,17 @@ class LLMConfig(BaseModel):
     api_base: str | None = None
     temperature: float = Field(default=0.7, ge=0., le=2.0)
     max_tokens: int = Field(default=2048, ge=0)
+    extra: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("model")
+    @classmethod
+    def model_must_not_be_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError(
+                "model must be a LiteLLM model string, "
+                "e.g. 'gpt-4' or 'anthropic/claude-opus-4.8'"
+            )
+        return v
 
     @field_validator("api_base")
     @classmethod

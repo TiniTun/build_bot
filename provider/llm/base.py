@@ -41,15 +41,21 @@ class LLMProvider:
 
     @classmethod
     def from_config(cls, config: "LLMConfig") -> "LLMProvider":
-        """Create provider from LLMConfig."""
+        """Create provider from LLMConfig.
+
+        Provider-specific parameters from ``config.extra`` are forwarded to
+        LiteLLM on every request, so Anthropic, OpenAI, and others share the
+        same flow without a provider registry.
+        """
         return cls(
             model=config.model,
             api_key=config.api_key,
             api_base=config.api_base,
             temperature=config.temperature,
-            max_tokens=config.max_tokens
+            max_tokens=config.max_tokens,
+            **config.extra,
         )
-    
+
     async def chat(
         self,
         messages: list[Message],
@@ -61,12 +67,16 @@ class LLMProvider:
             "model": self.model,
             "messages": messages,
             "api_key": self.api_key,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
         }
 
         if self.api_base:
             request_kwargs["api_base"] = self.api_base
         if tools:
             request_kwargs["tools"] = tools
+        # Provider-specific extras (from LLMConfig.extra), then per-call overrides.
+        request_kwargs.update(self._settings)
         request_kwargs.update(kwargs)
 
         response = await acompletion(**request_kwargs)

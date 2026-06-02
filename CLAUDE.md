@@ -20,27 +20,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ```bash
 # Run the CLI
 uv run build-bot chat
-uv run build-bot chat --agent pickle --workspace ./default_workspace
+uv run build-bot --workspace ./default_workspace chat --agent pickle
 
 # Run the server workers
 uv run build-bot server
+uv run build-bot --workspace ./default_workspace server
 
 # Or via installed entrypoint
 build-bot chat
-build-bot chat --agent pickle --workspace ./default_workspace
+build-bot --workspace ./default_workspace chat --agent pickle
 build-bot server
+
+# Validate workspace skills
+uv run build-bot --workspace ./default_workspace validate-skills
 
 # Tests
 uv run python -m unittest discover -s tests -p 'test_*.py'
 
 # Lint
-ruff check .
-ruff format .
+uv run ruff check .
+uv run ruff format .
 ```
 
 - Tests use `unittest` under `tests/`; keep new coverage narrow and behavior-focused.
 - If local `uv` is blocked by sandbox/cache/network issues, use the Codex `Test Run` environment action on `bakeryd`.
-- Prefer path-scoped `ruff check <files>` when unrelated repo-wide lint noise would hide the signal.
+- `--workspace` is a Typer global option, so it must come before the subcommand.
+- Prefer `uv run ruff check <files>` when unrelated repo-wide lint noise would hide the signal.
 
 ## Architecture
 
@@ -58,6 +63,8 @@ ruff format .
 - `core/commands/` — slash-command subsystem (`/help`, `/compact`, `/context`, `/session`, `/skills`). `CommandRegistry` is on `SharedContext`, not on `AgentSession`.
 - `RoutingTable` — resolves source strings to agents, caches source-session affinity in runtime config, and clears stale cached sessions missing from history.
 - `CronLoader` — loads `<crons_path>/<cron-id>/CRON.md` definitions and validates cron schedules.
+- `SkillLoader` — Skills v2 loader/validator; invalid skills are logged and skipped during discovery, while `validate-skills` surfaces errors.
+- `PendingActionStore` — stores confirmation-required actions under `<event_path>/pending_actions`.
 
 **`server/`**
 - `Worker` / `SubscriberWorker` — base async lifecycle classes.
@@ -75,15 +82,20 @@ ruff format .
 **`tools/`** — LLM-callable tools
 - `ToolRegistry` — register/execute tools by name; the dispatch parameter is `tool_name` so tools may safely accept their own `name` argument.
 - `ToolResult.success()` returns plain text; `ToolResult.error()` returns JSON with `ok: false` and a stable `error` object.
+- `ToolResult.requires_confirmation()` returns JSON with `requires_confirmation: true` and a pending action payload.
 - `ToolErrorCode` includes `permission_denied`, `auth_missing`, `rate_limited`, `invalid_args`, `not_found`, `provider_error`.
 - Built-ins are `read`, `write`, `edit`, `create_cron_job`, and `bash`.
 - `create_cron_job` is the supported path for creating `CRON.md` files. It writes under configured `crons_path`, validates the agent, accepts `name` plus compatible `title`, and supports `run_at` for one-off jobs.
-- Tools are built per-session in `Agent._build_tools()`.
+- Tools are built per-session in `Agent._build_tools()` through `CapabilityRegistry` + `ToolPolicy`.
+- Capability IDs are dotted (`email.search`); LLM tool names are safe underscores (`email_search`). Web tools keep legacy names `websearch` / `webread`.
 - Slash-command handlers must access shared services via `session.shared_context`, not directly on `session` or `session.agent`.
+- `email_*` and `calendar_*` tools are hidden unless `external_tools.<domain>.enabled` and policy enable their capability; null providers return `auth_missing`.
 
 **`utils/`**
 - `Config` — Pydantic model merged from `<workspace>/config.user.yaml` and optional `config.runtime.yaml`.
-- Runtime config stores mutable state such as routing bindings and `sources`.
+- Runtime config stores mutable state such as routing bindings, `sources`, and default delivery source.
+- `tools.enabled_capabilities` is strict when configured; no `tools:` block means permissive legacy behavior.
+- `external_tools.email` and `external_tools.calendar` are disabled by default.
 - Relative paths resolve against the workspace root: agents, skills, crons, memories, logs, history, events.
 - `timezone` must be a valid IANA timezone when configured and is used by cron scheduling helpers.
 - `def_loader` — parses YAML-frontmatter Markdown definitions (agents, skills).
@@ -99,18 +111,36 @@ ruff format .
 - `InboundEvent` is external work entering the system; `OutboundEvent` is platform delivery; `DispatchEvent` / `DispatchResultEvent` are internal agent-to-agent work.
 - Cron dispatches should avoid emitting empty final outbound messages; delivery should skip and ack empty non-error content.
 - For Telegram routing bugs, verify source-session mappings against `.history/index.jsonl`, not only `config.runtime.yaml`.
+- Confirm-required tools write pending actions; `/confirm <id>` executes through a permissive registry, `/reject <id>` discards.
+
+### Skills v2
+
+- Every `SKILL.md` needs `name`, `description`, non-empty `when_to_use`, and a non-empty body.
+- Optional skill fields: `required_tools`, `permissions`, `references`, `scripts`; unknown frontmatter keys are rejected.
+- Reference/script paths must be relative, stay inside the skill directory, and exist on disk.
+- The `skill` tool exposes only metadata in its schema, then returns the body plus a manifest of references/scripts on invocation.
+- `permissions` and `required_tools` are metadata only for now; they are not enforced.
+
+### Capability policy
+
+- Risk levels: `read`, `draft`, `confirm_required`, `write`.
+- If `tools:` is absent, all registered capabilities are allowed and confirm gates are bypassed to preserve legacy behavior.
+- If `tools.enabled_capabilities` is present, only listed dotted capability IDs are available.
+- `confirm_required` defaults to confirmation when policy is configured; keep cron/post_message legacy-safe in permissive mode.
+- `calendar_create_event` self-guards by recording a pending action and never mutating on first call.
 
 ### Workspace layout
 
 A workspace is a directory containing:
 ```
-config.user.yaml      # LLM keys, default_agent, optional websearch/webread/channels/api
+config.user.yaml      # LLM keys, default_agent, optional websearch/webread/channels/api/tools/external_tools
 config.runtime.yaml   # mutable runtime state; generated/updated by the app
 agents/<id>/AGENT.md  # YAML frontmatter (name, llm overrides, allow_skills) + system prompt body
-skills/<id>/SKILL.md  # YAML frontmatter (name, description) + skill content
+skills/<id>/SKILL.md  # Skills v2 frontmatter + body
 crons/<id>/CRON.md    # YAML frontmatter + prompt body for scheduled jobs
 .history/             # persisted sessions; source of truth for session existence
 .event/               # persisted pending events
+.event/pending_actions/ # confirmation-required tool actions
 ```
 
 `Config.load(workspace_path)` resolves all relative paths (`agents_path`, `skills_path`, `history_path`) against the workspace root. Default workspace is `./default_workspace`.

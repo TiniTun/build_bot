@@ -12,9 +12,40 @@ Each agent is a folder with an `AGENT.md` file — YAML frontmatter for config, 
 
 ```bash
 uv install
-cp default_workspace/config.user.yaml.example default_workspace/config.user.yaml
+cp default_workspace/config.example.yaml default_workspace/config.user.yaml
 # fill in your API key and model
 ```
+
+### Choosing a model
+
+Models are routed through [LiteLLM](https://docs.litellm.ai/docs/providers), so use
+the LiteLLM model string. `provider` is just a free-form label.
+
+OpenAI-compatible model:
+
+```yaml
+llm:
+  provider: openai
+  model: gpt-4
+  api_key: sk-...
+  temperature: 0.7
+  max_tokens: 2048
+```
+
+Anthropic Opus through LiteLLM:
+
+```yaml
+llm:
+  provider: anthropic
+  model: anthropic/claude-opus-4.8
+  api_key: sk-ant-...
+  temperature: 0.7
+  max_tokens: 4096
+```
+
+Provider-specific parameters can be passed through `extra:`, which is forwarded
+verbatim to LiteLLM. Per-agent overrides go in the agent's `AGENT.md` frontmatter
+under `llm:` and are merged over these defaults.
 
 ## Usage
 
