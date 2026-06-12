@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING
 from core.commands.base import Command
 from core.pending_actions import PendingActionStore
 from tools.capabilities import ToolPolicy
-from tools.capability_catalog import build_capability_registry
+from tools.capability_catalog import (
+    build_capability_registry,
+    build_confirmed_executor_registry,
+)
 from utils.def_loader import DefNotFoundError
 
 if TYPE_CHECKING:
@@ -288,33 +291,42 @@ class ConfirmCommand(Command):
         if action is None:
             return f"✗ Pending action `{action_id}` not found."
 
+        capability_id = action["capability_id"]
+        payload = action.get("payload", {})
+        if not isinstance(payload, dict):
+            return f"✗ Pending action `{action_id}` has an invalid payload."
+
+        config = session.shared_context.config
+
+        # Prefer a dedicated confirmed executor for provider mutations. It runs
+        # the real mutation directly, so /confirm never re-invokes the proposal
+        # tool (which would only record another pending action).
+        executor = build_confirmed_executor_registry(config).get(capability_id)
+        if executor is not None:
+            # Delete before executing: a provider call that may have mutated must
+            # not remain confirmable and risk a second mutation.
+            store.delete(action_id)
+            result = await executor(session, payload)
+            return f"✓ Confirmed `{capability_id}` — {action['summary']}.\n{result}"
+
+        # Legacy path: confirm-required builtins (cron/post_message) whose tools
+        # execute for real under a permissive registry.
         capabilities = build_capability_registry(
             session.agent.agent_def,
             session.shared_context,
             include_post_message=session.state.source.is_cron,
         )
         capability = next(
-            (
-                cap
-                for cap in capabilities.capabilities()
-                if cap.id == action["capability_id"]
-            ),
+            (cap for cap in capabilities.capabilities() if cap.id == capability_id),
             None,
         )
         if capability is None:
-            return f"✗ Capability `{action['capability_id']}` is not available."
-
-        payload = action.get("payload", {})
-        if not isinstance(payload, dict):
-            return f"✗ Pending action `{action_id}` has an invalid payload."
+            return f"✗ Capability `{capability_id}` is not available."
 
         registry = capabilities.build_tool_registry(ToolPolicy.permissive())
         store.delete(action_id)
         result = await registry.execute_tool(capability.tool_name, session, **payload)
-        return (
-            f"✓ Confirmed `{action['capability_id']}` — {action['summary']}.\n"
-            f"{result}"
-        )
+        return f"✓ Confirmed `{capability_id}` — {action['summary']}.\n{result}"
 
 
 class RejectCommand(Command):

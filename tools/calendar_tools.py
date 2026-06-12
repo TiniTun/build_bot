@@ -15,6 +15,7 @@ from core.pending_actions import PendingActionStore
 from provider.calendar import CreateEventRequest, get_calendar_provider
 from tools.base import BaseTool, ToolErrorCode, ToolResult, tool
 from tools.capabilities import CapabilityDef, ToolRiskLevel
+from tools.confirmed_executors import ConfirmedExecutor
 from tools.external_support import provider_exception_to_result
 
 if TYPE_CHECKING:
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
 
 
 CREATE_EVENT_CAPABILITY_ID = "calendar.create_event"
+UPDATE_EVENT_CAPABILITY_ID = "calendar.update_event"
+DELETE_EVENT_CAPABILITY_ID = "calendar.delete_event"
 
 
 def build_calendar_capabilities(
@@ -171,6 +174,120 @@ def build_calendar_capabilities(
             payload=payload,
         ).to_tool_content()
 
+    @tool(
+        name="calendar_update_event",
+        description=(
+            "Propose updating an existing calendar event. This requires user "
+            "confirmation and does not modify the event directly."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string", "description": "Event id to update."},
+                "title": {"type": "string", "description": "Event title."},
+                "start": {"type": "string", "description": "ISO start datetime."},
+                "end": {"type": "string", "description": "ISO end datetime."},
+                "attendees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Attendee emails (optional).",
+                },
+                "location": {"type": "string", "description": "Location (optional)."},
+                "description": {
+                    "type": "string",
+                    "description": "Event description (optional).",
+                },
+            },
+            "required": ["event_id", "title", "start", "end"],
+        },
+    )
+    async def calendar_update_event(
+        event_id: str,
+        title: str,
+        start: str,
+        end: str,
+        session: "AgentSession",
+        attendees: list[str] | None = None,
+        location: str | None = None,
+        description: str | None = None,
+    ) -> str:
+        # Validate the request shape, but never call provider.update_event here.
+        try:
+            request = CreateEventRequest(
+                title=title,
+                start=start,
+                end=end,
+                attendees=attendees or [],
+                location=location,
+                description=description,
+            )
+        except ValidationError as e:
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                f"Invalid event request: {e.error_count()} field error(s).",
+                user_action="Provide event_id, title, ISO start, and ISO end.",
+            ).to_tool_content()
+
+        action_id = str(uuid.uuid4())
+        summary = (
+            f"Update calendar event {event_id}: {request.title} "
+            f"({request.start} → {request.end})"
+        )
+        payload = {"event_id": event_id, **request.model_dump()}
+        PendingActionStore(session.shared_context.config).create(
+            action_id=action_id,
+            capability_id=UPDATE_EVENT_CAPABILITY_ID,
+            summary=summary,
+            payload=payload,
+        )
+        return ToolResult.requires_confirmation(
+            action_id=action_id,
+            capability_id=UPDATE_EVENT_CAPABILITY_ID,
+            summary=summary,
+            payload=payload,
+        ).to_tool_content()
+
+    @tool(
+        name="calendar_delete_event",
+        description=(
+            "Propose deleting a calendar event. This requires user confirmation "
+            "and does not delete the event directly."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "event_id": {"type": "string", "description": "Event id to delete."},
+            },
+            "required": ["event_id"],
+        },
+    )
+    async def calendar_delete_event(
+        event_id: str,
+        session: "AgentSession",
+    ) -> str:
+        if not event_id:
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                "An event_id is required to delete an event.",
+                user_action="Provide the event_id to delete.",
+            ).to_tool_content()
+
+        action_id = str(uuid.uuid4())
+        summary = f"Delete calendar event {event_id}"
+        payload = {"event_id": event_id}
+        PendingActionStore(session.shared_context.config).create(
+            action_id=action_id,
+            capability_id=DELETE_EVENT_CAPABILITY_ID,
+            summary=summary,
+            payload=payload,
+        )
+        return ToolResult.requires_confirmation(
+            action_id=action_id,
+            capability_id=DELETE_EVENT_CAPABILITY_ID,
+            summary=summary,
+            payload=payload,
+        ).to_tool_content()
+
     return [
         (
             CapabilityDef(
@@ -208,4 +325,112 @@ def build_calendar_capabilities(
             ),
             calendar_create_event,
         ),
+        (
+            CapabilityDef(
+                id=UPDATE_EVENT_CAPABILITY_ID,
+                tool_name="calendar_update_event",
+                domain="calendar",
+                operation="update_event",
+                description="Update a calendar event after explicit confirmation.",
+                risk_level=ToolRiskLevel.CONFIRM_REQUIRED,
+                required_config=["external_tools.calendar"],
+            ),
+            calendar_update_event,
+        ),
+        (
+            CapabilityDef(
+                id=DELETE_EVENT_CAPABILITY_ID,
+                tool_name="calendar_delete_event",
+                domain="calendar",
+                operation="delete_event",
+                description="Delete a calendar event after explicit confirmation.",
+                risk_level=ToolRiskLevel.CONFIRM_REQUIRED,
+                required_config=["external_tools.calendar"],
+            ),
+            calendar_delete_event,
+        ),
     ]
+
+
+def build_calendar_confirmed_executors(
+    config: "Config",
+) -> dict[str, ConfirmedExecutor]:
+    """Confirmed executors for calendar mutations, or {} when calendar is disabled.
+
+    Each executor performs the real provider mutation exactly once. ``/confirm``
+    routes a stored pending action here instead of re-invoking the proposal tool,
+    so confirming never creates another pending action.
+    """
+    if not config.external_tools.calendar.enabled:
+        return {}
+
+    provider = get_calendar_provider(config)
+
+    async def create_event_confirmed(
+        session: "AgentSession", payload: dict
+    ) -> str:
+        try:
+            request = CreateEventRequest(**payload)
+        except (ValidationError, TypeError):
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                "Stored event request is invalid.",
+            ).to_tool_content()
+        try:
+            event = await provider.create_event(request)
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return provider_exception_to_result(e).to_tool_content()
+        return ToolResult.success(
+            f"Event created (id={event.id}): {event.title} "
+            f"({event.start} → {event.end})."
+        ).to_tool_content()
+
+    async def update_event_confirmed(
+        session: "AgentSession", payload: dict
+    ) -> str:
+        event_id = payload.get("event_id")
+        if not event_id:
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                "Stored update request is missing an event_id.",
+            ).to_tool_content()
+        try:
+            request = CreateEventRequest(
+                **{k: v for k, v in payload.items() if k != "event_id"}
+            )
+        except (ValidationError, TypeError):
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                "Stored event request is invalid.",
+            ).to_tool_content()
+        try:
+            event = await provider.update_event(event_id, request)
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return provider_exception_to_result(e).to_tool_content()
+        return ToolResult.success(
+            f"Event updated (id={event.id}): {event.title} "
+            f"({event.start} → {event.end})."
+        ).to_tool_content()
+
+    async def delete_event_confirmed(
+        session: "AgentSession", payload: dict
+    ) -> str:
+        event_id = payload.get("event_id")
+        if not event_id:
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                "Stored delete request is missing an event_id.",
+            ).to_tool_content()
+        try:
+            await provider.delete_event(event_id)
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return provider_exception_to_result(e).to_tool_content()
+        return ToolResult.success(
+            f"Event deleted (id={event_id})."
+        ).to_tool_content()
+
+    return {
+        CREATE_EVENT_CAPABILITY_ID: create_event_confirmed,
+        UPDATE_EVENT_CAPABILITY_ID: update_event_confirmed,
+        DELETE_EVENT_CAPABILITY_ID: delete_event_confirmed,
+    }

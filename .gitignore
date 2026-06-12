@@ -27,9 +27,11 @@ default_workspace/skills/*
 default_workspace/.history/
 default_workspace/.logs/
 default_workspace/.event/
+default_workspace/.secrets/
 default_workspace/memories/
 default_workspace/crons/
 
 docs/
 
 ._*
+.DS_Store

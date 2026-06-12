@@ -48,3 +48,26 @@ default_agent: pickle
 #       max_file_size_mb: 20            # reject larger voice files (OpenAI upload cap)
 #       max_duration_seconds: 300       # reject longer voice notes before download
 #       request_timeout_seconds: 60     # transcription request timeout
+
+# external_tools:
+#   email:
+#     enabled: true
+#     provider: gmail
+#     credentials_path: /path/to/file/client_secret.json
+#     token_path: /path/to/file/gmail_token.json
+#     scopes:
+#       - https://www.googleapis.com/auth/gmail.readonly
+#       - https://www.googleapis.com/auth/gmail.compose    # drafts only (no auto-send)
+#       # add .../auth/gmail.modify only if enabling email.send / email.delete
+#   calendar:
+#     enabled: true
+#     provider: google_calendar
+#     credentials_path: /path/to/file/client_secret.json
+#     token_path: /path/to/file/calendar_token.json
+#     calendar_id: primary
+#     scopes:
+#       - https://www.googleapis.com/auth/calendar.readonly
+#       - https://www.googleapis.com/auth/calendar.events
+# tools:
+#   enabled_capabilities: [email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event]
+#   risk_policy: {read: allow, draft: allow, confirm_required: require_confirmation}

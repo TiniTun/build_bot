@@ -16,7 +16,7 @@
       "Bash(rm -rf *)",
       "Bash(curl *)",
       "Read(./default_workspace/config.user.yaml)",
-      "Read(./default_workspace/config.*.yaml)",
+      "Read(./default_workspace/config.runtime.yaml)",
       "Read(./.env)",
       "Read(./.env.*)",
       "Skill(gsd-*)"

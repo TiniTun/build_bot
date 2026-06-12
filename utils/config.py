@@ -116,10 +116,20 @@ class ToolsConfig(BaseModel):
 
 
 class ExternalProviderConfig(BaseModel):
-    """Configuration for a single external provider domain (email/calendar)."""
+    """Configuration for a single external provider domain (email/calendar).
+
+    ``credentials_path``/``token_path`` are workspace-relative paths to the
+    Google OAuth client secret and the cached user token. ``scopes`` are the
+    explicit OAuth scopes granted to this domain. ``calendar_id`` is only used
+    by the calendar domain (defaults to ``primary`` at the provider layer).
+    """
 
     provider: str | None = None
     enabled: bool = False
+    credentials_path: str | None = None
+    token_path: str | None = None
+    scopes: list[str] = Field(default_factory=list)
+    calendar_id: str | None = None
 
 
 class ExternalToolsConfig(BaseModel):

@@ -1,8 +1,8 @@
 """Calendar provider protocol, data models, and a null provider.
 
-Real provider integration (e.g. Google Calendar) is out of scope for this
-iteration. ``get_calendar_provider`` returns a ``NullCalendarProvider`` that
-raises ``AuthMissingError`` until a real client is wired in.
+``get_calendar_provider`` selects ``GoogleCalendarProvider`` when the calendar
+domain is enabled with ``provider == "google_calendar"``; otherwise it returns a
+``NullCalendarProvider`` that raises ``AuthMissingError``.
 
 Note: ``calendar.create_event`` is confirmation-gated at the tool layer and
 never reaches a provider without an explicit confirmation step.
@@ -50,7 +50,7 @@ class CreateEventRequest(BaseModel):
 
 @runtime_checkable
 class CalendarProvider(Protocol):
-    """Read/availability/create calendar operations. No delete/update here."""
+    """Read/availability/create/update/delete calendar operations."""
 
     async def search(
         self,
@@ -67,6 +67,12 @@ class CalendarProvider(Protocol):
     ) -> AvailabilityResult: ...
 
     async def create_event(self, request: CreateEventRequest) -> CalendarEvent: ...
+
+    async def update_event(
+        self, event_id: str, request: CreateEventRequest
+    ) -> CalendarEvent: ...
+
+    async def delete_event(self, event_id: str) -> None: ...
 
 
 class NullCalendarProvider:
@@ -85,12 +91,23 @@ class NullCalendarProvider:
     async def create_event(self, request: CreateEventRequest) -> CalendarEvent:
         raise AuthMissingError("calendar provider is not configured")
 
+    async def update_event(
+        self, event_id: str, request: CreateEventRequest
+    ) -> CalendarEvent:
+        raise AuthMissingError("calendar provider is not configured")
+
+    async def delete_event(self, event_id: str) -> None:
+        raise AuthMissingError("calendar provider is not configured")
+
 
 def get_calendar_provider(config: "Config") -> CalendarProvider:
     """Return the configured calendar provider, or a null provider if unavailable."""
     external = config.external_tools.calendar
     if not external.enabled:
         return NullCalendarProvider()
-    # No real client is bundled yet; a real provider would be selected here based
-    # on ``external.provider``. Until then, behave as auth-missing.
+    if external.provider == "google_calendar":
+        from provider.calendar.google_calendar import GoogleCalendarProvider
+
+        return GoogleCalendarProvider(config, external)
+    # Unknown provider name: behave as auth-missing rather than raising.
     return NullCalendarProvider()

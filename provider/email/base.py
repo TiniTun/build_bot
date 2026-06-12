@@ -6,7 +6,7 @@ iteration. ``get_email_provider`` returns a ``NullEmailProvider`` that raises
 ``AUTH_MISSING`` error instead of failing opaquely.
 """
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -47,13 +47,21 @@ class DraftResult(BaseModel):
 
 @runtime_checkable
 class EmailProvider(Protocol):
-    """Read/draft email operations. No send capability in this iteration."""
+    """Read/draft email operations plus confirmation-gated send/delete.
+
+    ``send_reply`` and ``delete`` mutate the mailbox and are only reached through
+    the confirmed-execution path; the proposal tools never call them directly.
+    """
 
     async def search(self, query: str, limit: int) -> list[EmailSummary]: ...
 
     async def read(self, message_id: str) -> EmailMessage: ...
 
     async def draft_reply(self, message_id: str, body: str) -> DraftResult: ...
+
+    async def send_reply(self, message_id: str, body: str) -> dict[str, Any]: ...
+
+    async def delete(self, message_id: str) -> None: ...
 
 
 class NullEmailProvider:
@@ -68,12 +76,21 @@ class NullEmailProvider:
     async def draft_reply(self, message_id: str, body: str) -> DraftResult:
         raise AuthMissingError("email provider is not configured")
 
+    async def send_reply(self, message_id: str, body: str) -> dict[str, Any]:
+        raise AuthMissingError("email provider is not configured")
+
+    async def delete(self, message_id: str) -> None:
+        raise AuthMissingError("email provider is not configured")
+
 
 def get_email_provider(config: "Config") -> EmailProvider:
     """Return the configured email provider, or a null provider if unavailable."""
     external = config.external_tools.email
     if not external.enabled:
         return NullEmailProvider()
-    # No real client is bundled yet; a real provider would be selected here based
-    # on ``external.provider``. Until then, behave as auth-missing.
+    if external.provider == "gmail":
+        from provider.email.gmail import GmailProvider
+
+        return GmailProvider(config, external)
+    # Unknown/unspecified provider: behave as auth-missing rather than raising.
     return NullEmailProvider()

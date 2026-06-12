@@ -5,10 +5,6 @@ from utils.config import Config
 
 from pathlib import Path
 
-
-from pathlib import Path
-
-
 from core.cron_loader import CronDef
 
 

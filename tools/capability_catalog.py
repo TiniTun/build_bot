@@ -10,9 +10,16 @@ tool set matches the legacy ``Agent._build_tools`` behavior.
 from typing import TYPE_CHECKING
 
 from tools.builtin_tools import bash, create_cron_job, edit_file, read_file, write_file
-from tools.calendar_tools import build_calendar_capabilities
+from tools.calendar_tools import (
+    build_calendar_capabilities,
+    build_calendar_confirmed_executors,
+)
 from tools.capabilities import CapabilityDef, CapabilityRegistry, ToolRiskLevel
-from tools.email_tools import build_email_capabilities
+from tools.confirmed_executors import ConfirmedExecutorRegistry
+from tools.email_tools import (
+    build_email_capabilities,
+    build_email_confirmed_executors,
+)
 from tools.post_message_tool import create_post_message_tool
 from tools.skill_tool import create_skill_tool
 from tools.subagent_tool import create_subagent_dispatch_tool
@@ -22,6 +29,7 @@ from tools.websearch_tool import create_websearch_tool
 if TYPE_CHECKING:
     from core.agent_loader import AgentDef
     from core.context import SharedContext
+    from utils.config import Config
 
 
 def _builtin_capabilities() -> list[tuple[CapabilityDef, object]]:
@@ -186,4 +194,18 @@ def build_capability_registry(
     for capability, tool in build_calendar_capabilities(config):
         registry.register(capability, tool)
 
+    return registry
+
+
+def build_confirmed_executor_registry(config: "Config") -> ConfirmedExecutorRegistry:
+    """Assemble confirmed executors for mutation capabilities (post-confirm path).
+
+    Keyed by dotted capability id; ``ConfirmCommand`` looks an action's capability
+    up here and runs the executor exactly once. Domains with no enabled provider
+    contribute nothing, so legacy confirm-required builtins (cron/post_message)
+    keep their existing re-execute-by-tool-name path.
+    """
+    registry = ConfirmedExecutorRegistry()
+    registry.merge(build_email_confirmed_executors(config))
+    registry.merge(build_calendar_confirmed_executors(config))
     return registry
