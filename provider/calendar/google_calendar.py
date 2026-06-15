@@ -8,6 +8,7 @@ installed. Raw API payloads and tokens are never returned or logged; Google
 """
 
 import asyncio
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from provider.calendar.base import (
@@ -15,7 +16,11 @@ from provider.calendar.base import (
     CalendarEvent,
     CreateEventRequest,
 )
-from provider.external_errors import ProviderNotFoundError, ProviderPermissionError
+from provider.external_errors import (
+    ProviderInvalidRequestError,
+    ProviderNotFoundError,
+    ProviderPermissionError,
+)
 
 if TYPE_CHECKING:
     from utils.config import Config, ExternalProviderConfig
@@ -38,7 +43,31 @@ def _map_http_error(exc: Exception) -> Exception:
             return ProviderPermissionError("google calendar denied the request")
         if status == 404:
             return ProviderNotFoundError("google calendar resource not found")
+        if status == 400:
+            return ProviderInvalidRequestError("google calendar rejected the request")
     return exc
+
+
+def _has_utc_offset(value: str) -> bool:
+    """Return True when an ISO datetime string carries a UTC offset.
+
+    Google Calendar requires either an offset-bearing RFC3339 ``dateTime`` or an
+    accompanying ``timeZone``; a naive datetime with neither is rejected with a
+    400. We detect the offset so callers can attach a ``timeZone`` only when one
+    is actually missing.
+    """
+    try:
+        return datetime.fromisoformat(value).utcoffset() is not None
+    except ValueError:
+        return False
+
+
+def _event_datetime(value: str, timezone: str | None) -> dict[str, Any]:
+    """Build a Google ``start``/``end`` block, attaching ``timeZone`` if naive."""
+    block: dict[str, Any] = {"dateTime": value}
+    if timezone and not _has_utc_offset(value):
+        block["timeZone"] = timezone
+    return block
 
 
 def _event_from_item(item: dict[str, Any]) -> CalendarEvent:
@@ -60,12 +89,18 @@ def _event_from_item(item: dict[str, Any]) -> CalendarEvent:
     )
 
 
-def _event_body(request: CreateEventRequest) -> dict[str, Any]:
-    """Build a Google Calendar event body from a ``CreateEventRequest``."""
+def _event_body(
+    request: CreateEventRequest, timezone: str | None = None
+) -> dict[str, Any]:
+    """Build a Google Calendar event body from a ``CreateEventRequest``.
+
+    Naive datetimes (no UTC offset) get ``timeZone`` attached from ``timezone``
+    so Google can resolve them; offset-bearing datetimes are sent unchanged.
+    """
     body: dict[str, Any] = {
         "summary": request.title,
-        "start": {"dateTime": request.start},
-        "end": {"dateTime": request.end},
+        "start": _event_datetime(request.start, timezone),
+        "end": _event_datetime(request.end, timezone),
     }
     if request.attendees:
         body["attendees"] = [{"email": email} for email in request.attendees]
@@ -89,6 +124,10 @@ class GoogleCalendarProvider:
         self._provider_cfg = provider_cfg
         self._service = service  # injected fake in tests
         self._calendar_id = provider_cfg.calendar_id or "primary"
+
+    def _timezone(self) -> str | None:
+        """Configured IANA timezone used to qualify naive event datetimes."""
+        return getattr(self._config, "timezone", None)
 
     def _svc(self) -> Any:
         if self._service is None:
@@ -150,7 +189,10 @@ class GoogleCalendarProvider:
             response = await asyncio.to_thread(
                 self._svc()
                 .events()
-                .insert(calendarId=self._calendar_id, body=_event_body(request))
+                .insert(
+                    calendarId=self._calendar_id,
+                    body=_event_body(request, self._timezone()),
+                )
                 .execute
             )
         except Exception as e:  # noqa: BLE001 - mapped to stable error codes
@@ -167,7 +209,7 @@ class GoogleCalendarProvider:
                 .patch(
                     calendarId=self._calendar_id,
                     eventId=event_id,
-                    body=_event_body(request),
+                    body=_event_body(request, self._timezone()),
                 )
                 .execute
             )

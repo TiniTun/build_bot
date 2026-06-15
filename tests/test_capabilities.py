@@ -90,8 +90,88 @@ class CapabilityCatalogTests(unittest.TestCase):
                     "create_cron_job",
                     "bash",
                     "subagent_dispatch",
+                    "memory_search",
+                    "memory_store_fact",
+                    "memory_store_preference",
+                    "memory_store_project_context",
+                    "memory_store_decision",
+                    "memory_append_daily_note",
                 },
             )
+
+    def test_absent_allowed_capabilities_preserves_legacy_tool_set(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = _context(workspace)
+            agent_def = _agent_def(context)  # allowed_capabilities is None
+            caps = build_capability_registry(
+                agent_def, context, include_post_message=False
+            )
+            with_profile = _tool_names(
+                caps.build_tool_registry(
+                    ToolPolicy.from_config(
+                        context.config, agent_def.allowed_capabilities
+                    )
+                )
+            )
+            without_profile = _tool_names(
+                caps.build_tool_registry(ToolPolicy.from_config(context.config))
+            )
+            self.assertEqual(with_profile, without_profile)
+
+    def test_allowed_capabilities_narrows_in_permissive_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = _context(workspace)  # no tools config => permissive
+            agent_def = _agent_def(context).model_copy(
+                update={
+                    "allowed_capabilities": [
+                        "agent.subagent_dispatch",
+                        "memory.search",
+                    ]
+                }
+            )
+            caps = build_capability_registry(
+                agent_def, context, include_post_message=False
+            )
+            names = _tool_names(
+                caps.build_tool_registry(
+                    ToolPolicy.from_config(
+                        context.config, agent_def.allowed_capabilities
+                    )
+                )
+            )
+            self.assertEqual(names, {"subagent_dispatch", "memory_search"})
+
+    def test_allowed_capabilities_intersects_with_enabled_capabilities(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = _context(workspace)
+            # Globally enables read + edit; agent allows read + bash.
+            context.config.tools = ToolsConfig(
+                enabled_capabilities=["filesystem.read", "filesystem.edit"]
+            )
+            agent_def = _agent_def(context).model_copy(
+                update={
+                    "allowed_capabilities": ["filesystem.read", "shell.bash"]
+                }
+            )
+            caps = build_capability_registry(
+                agent_def, context, include_post_message=False
+            )
+            names = _tool_names(
+                caps.build_tool_registry(
+                    ToolPolicy.from_config(
+                        context.config, agent_def.allowed_capabilities
+                    )
+                )
+            )
+            # Only the intersection survives.
+            self.assertIn("read", names)
+            # Globally enabled but not agent-allowed -> absent.
+            self.assertNotIn("edit", names)
+            # Agent-allowed but not globally enabled -> absent.
+            self.assertNotIn("bash", names)
 
     def test_dotted_capability_ids_preserved_with_safe_tool_names(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

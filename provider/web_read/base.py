@@ -36,7 +36,7 @@ class WebReadProvider(ABC):
             case "crawl4ai":
                 from .crawl4ai import Crawl4AIProvider
 
-                return Crawl4AIProvider()
+                return Crawl4AIProvider(config.webread)
 
             case _:
                 raise ValueError(f"Unknown webread provider: {config.webread.provider}")

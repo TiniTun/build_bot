@@ -26,6 +26,7 @@ class AgentDef(BaseModel):
     llm: LLMConfig
     allow_skills: bool = False
     max_concurrency: int = Field(default=1, ge=1)
+    allowed_capabilities: list[str] | None = None
 
 class AgentLoader:
     """Loads agent definitions from AGENT.md files."""
@@ -75,7 +76,8 @@ class AgentLoader:
                 soul_md=soul_md,
                 llm=merged_llm,
                 allow_skills=frontmatter.get("allow_skills", False),
-                max_concurrency=frontmatter.get("max_concurrency", 1)
+                max_concurrency=frontmatter.get("max_concurrency", 1),
+                allowed_capabilities=frontmatter.get("allowed_capabilities"),
             )
         except ValidationError as e:
             raise InvalidDefError("agent", def_id, str(e))

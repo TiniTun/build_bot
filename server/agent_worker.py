@@ -28,6 +28,17 @@ if TYPE_CHECKING:
 # Maximum number of retry attempts for failed sessions
 MAX_RETRIES = 3
 
+# Agent id of the memory-manager that owns durable-memory extraction.
+MEMORY_MANAGER_AGENT_ID = "cookie"
+
+# Prompt handed to the memory manager for fire-and-forget Stage B extraction.
+_MEMORY_EXTRACTION_PROMPT = (
+    "Extract any durable facts, preferences, project updates, or decisions from "
+    "the following user message and store them via your memory tools. Store concise "
+    "entries only; never store raw conversation. If there is nothing durable worth "
+    "saving, do nothing.\n\nUser message:\n{content}"
+)
+
 logger = logging.getLogger(__name__)
 
 ProcessableEvent = Union[InboundEvent, DispatchEvent]
@@ -98,6 +109,11 @@ class AgentWorker(SubscriberWorker):
                 logger.info(f"Session completed: {session_id}")
 
                 await self._emit_response(event, content=response, agent_id=agent_def.id)
+
+                if self._should_auto_extract(event, agent_def):
+                    asyncio.create_task(
+                        self._run_memory_extraction(event, agent_def)
+                    )
             
             except Exception as e:
                 logger.error(f"Session failed: {e}, ")
@@ -151,6 +167,48 @@ class AgentWorker(SubscriberWorker):
                 error=str(error) if error else None,
             )
         await self.context.eventbus.publish(result_event)
+
+    def _should_auto_extract(
+        self, event: ProcessableEvent, agent_def: "AgentDef"
+    ) -> bool:
+        """Decide whether to run Stage B durable-memory extraction.
+
+        Only user-facing ``InboundEvent`` turns qualify, never the memory
+        manager's own sessions, and only when ``memory.auto_extract`` is enabled.
+        """
+        if not self.context.config.memory.auto_extract:
+            return False
+        if not isinstance(event, InboundEvent):
+            return False
+        if agent_def.id == MEMORY_MANAGER_AGENT_ID:
+            return False
+        return True
+
+    async def _run_memory_extraction(
+        self, event: ProcessableEvent, agent_def: "AgentDef"
+    ) -> None:
+        """Fire-and-forget durable-fact extraction via the memory manager.
+
+        Runs Cookie on the user's message without producing any user-visible
+        output: no event is published from here. Exceptions are swallowed and
+        logged so extraction never breaks the main turn.
+        """
+        try:
+            try:
+                cookie_def = self.context.agent_loader.load(MEMORY_MANAGER_AGENT_ID)
+            except DefNotFoundError:
+                logger.debug(
+                    "Memory manager agent '%s' not found; skipping auto-extract",
+                    MEMORY_MANAGER_AGENT_ID,
+                )
+                return
+
+            agent = Agent(cookie_def, self.context)
+            session = agent.new_session(source=AgentEventSource(cookie_def.id))
+            prompt = _MEMORY_EXTRACTION_PROMPT.format(content=event.content)
+            await session.chat(prompt)
+        except Exception as e:  # noqa: BLE001 - fire-and-forget must never bubble
+            logger.warning("Memory extraction failed: %s", e)
 
     def _get_or_create_semaphore(self, agent_def: "AgentDef") -> asyncio.Semaphore:
         """Get existing or create new semaphore for agent."""

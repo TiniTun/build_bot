@@ -82,6 +82,8 @@ class Crawl4AIWebReadConfig(BaseModel):
     """Configuration for web read provider."""
 
     provider: Literal["crawl4ai"] = "crawl4ai"
+    page_timeout_seconds: int = Field(default=20, gt=0, le=120)
+    max_content_chars: int = Field(default=10_000, gt=0)
 
 
 class SourceSessionConfig(BaseModel):
@@ -139,6 +141,13 @@ class ExternalToolsConfig(BaseModel):
     calendar: ExternalProviderConfig = Field(default_factory=ExternalProviderConfig)
 
 
+class MemoryConfig(BaseModel):
+    """Opt-in durable-memory workflow toggles. Disabled by default."""
+
+    auto_retrieve: bool = False
+    auto_extract: bool = False
+
+
 class Config(BaseModel):
     """Main configuration"""
 
@@ -158,6 +167,7 @@ class Config(BaseModel):
     api: ApiConfig = Field(default_factory=ApiConfig)
     tools: ToolsConfig | None = None
     external_tools: ExternalToolsConfig = Field(default_factory=ExternalToolsConfig)
+    memory: MemoryConfig = Field(default_factory=MemoryConfig)
     sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
     routing: dict = Field(default_factory=lambda: {"bindings": []})
     default_delivery_source: str | None = None

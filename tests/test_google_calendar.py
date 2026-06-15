@@ -18,6 +18,7 @@ from provider.calendar.base import (
     CreateEventRequest,
 )
 from provider.calendar.google_calendar import GoogleCalendarProvider
+from provider.external_errors import ProviderInvalidRequestError
 from tests.helpers import make_context, make_workspace
 from tools.base import ToolErrorCode
 from tools.calendar_tools import (
@@ -221,6 +222,64 @@ class GoogleCalendarProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.id, "new1")
         self.assertEqual(service.calls[0][0], "insert")
 
+    async def test_naive_datetime_gets_config_timezone(self) -> None:
+        service = FakeService(
+            insert_result={
+                "id": "new1",
+                "summary": "Test Smoke Meeting",
+                "start": {"dateTime": "2026-06-16T10:00:00"},
+                "end": {"dateTime": "2026-06-16T10:30:00"},
+            }
+        )
+        config = SimpleNamespace(timezone="Australia/Brisbane")
+        provider = GoogleCalendarProvider(config, _provider_cfg(), service=service)
+        await provider.create_event(
+            CreateEventRequest(
+                title="Test Smoke Meeting",
+                start="2026-06-16T10:00:00",
+                end="2026-06-16T10:30:00",
+            )
+        )
+        _, kwargs = service.calls[0]
+        body = kwargs["body"]
+        self.assertEqual(body["start"]["timeZone"], "Australia/Brisbane")
+        self.assertEqual(body["end"]["timeZone"], "Australia/Brisbane")
+        self.assertEqual(body["start"]["dateTime"], "2026-06-16T10:00:00")
+
+    async def test_offset_datetime_keeps_no_timezone(self) -> None:
+        service = FakeService(
+            insert_result={
+                "id": "new1",
+                "summary": "Lunch",
+                "start": {"dateTime": "2026-06-16T10:00:00+10:00"},
+                "end": {"dateTime": "2026-06-16T10:30:00+10:00"},
+            }
+        )
+        config = SimpleNamespace(timezone="Australia/Brisbane")
+        provider = GoogleCalendarProvider(config, _provider_cfg(), service=service)
+        await provider.create_event(
+            CreateEventRequest(
+                title="Lunch",
+                start="2026-06-16T10:00:00+10:00",
+                end="2026-06-16T10:30:00+10:00",
+            )
+        )
+        _, kwargs = service.calls[0]
+        body = kwargs["body"]
+        # Offset already present: do not attach a (possibly conflicting) timeZone.
+        self.assertNotIn("timeZone", body["start"])
+        self.assertNotIn("timeZone", body["end"])
+
+    async def test_invalid_request_error_maps(self) -> None:
+        service = FakeService(exc=_http_error(400))
+        provider = GoogleCalendarProvider(None, _provider_cfg(), service=service)
+        with self.assertRaises(ProviderInvalidRequestError):
+            await provider.create_event(
+                CreateEventRequest(
+                    title="x", start="2026-06-16T10:00:00", end="2026-06-16T10:30:00"
+                )
+            )
+
     async def test_update_and_delete(self) -> None:
         service = FakeService(
             patch_result={
@@ -385,6 +444,51 @@ class CalendarToolApprovalTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertTrue(store.delete(action_id))
             self.assertEqual(counting.inserts, 1)  # unchanged by reject
+
+    async def test_confirmed_create_naive_datetime_succeeds(self) -> None:
+        # Smoke case: naive datetime + config.timezone must NOT become a
+        # generic provider_error; the body carries timeZone and Google succeeds.
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_context(tmp)
+            context.config.timezone = "Australia/Brisbane"
+            insert_service = FakeService(
+                insert_result={
+                    "id": "smoke1",
+                    "summary": "Test Smoke Meeting",
+                    "start": {"dateTime": "2026-06-16T10:00:00"},
+                    "end": {"dateTime": "2026-06-16T10:30:00"},
+                }
+            )
+            provider = GoogleCalendarProvider(
+                context.config, _provider_cfg(), service=insert_service
+            )
+            import tools.calendar_tools as ct
+
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: provider
+            try:
+                executor = build_calendar_confirmed_executors(context.config)[
+                    "calendar.create_event"
+                ]
+                raw = await executor(
+                    _session(context),
+                    {
+                        "title": "Test Smoke Meeting",
+                        "start": "2026-06-16T10:00:00",
+                        "end": "2026-06-16T10:30:00",
+                        "attendees": [],
+                        "location": None,
+                        "description": None,
+                    },
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertIn("Event created", raw)
+            self.assertNotIn("provider_error", raw)
+            _, kwargs = insert_service.calls[0]
+            self.assertEqual(
+                kwargs["body"]["start"]["timeZone"], "Australia/Brisbane"
+            )
 
     async def test_update_proposal_then_confirmed_patch_once(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

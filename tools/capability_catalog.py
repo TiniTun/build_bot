@@ -20,6 +20,7 @@ from tools.email_tools import (
     build_email_capabilities,
     build_email_confirmed_executors,
 )
+from tools.memory_tools import build_memory_capabilities
 from tools.post_message_tool import create_post_message_tool
 from tools.skill_tool import create_skill_tool
 from tools.subagent_tool import create_subagent_dispatch_tool
@@ -192,6 +193,8 @@ def build_capability_registry(
     for capability, tool in build_email_capabilities(config):
         registry.register(capability, tool)
     for capability, tool in build_calendar_capabilities(config):
+        registry.register(capability, tool)
+    for capability, tool in build_memory_capabilities(config):
         registry.register(capability, tool)
 
     return registry

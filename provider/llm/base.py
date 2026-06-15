@@ -24,6 +24,12 @@ class LLMToolCall:
     arguments: str # JSON string
 
 
+def _supports_custom_temperature(model: str) -> bool:
+    """Return whether the configured model accepts non-default temperature."""
+    model_name = model.rsplit("/", 1)[-1].lower()
+    return not model_name.startswith("gpt-5")
+
+
 class LLMProvider:
     """LLM provider using litellm for multi-provider support."""
 
@@ -72,9 +78,10 @@ class LLMProvider:
             "model": self.model,
             "messages": messages,
             "api_key": self.api_key,
-            "temperature": self.temperature,
             "max_tokens": self.max_tokens,
         }
+        if _supports_custom_temperature(self.model):
+            request_kwargs["temperature"] = self.temperature
 
         if self.api_base:
             request_kwargs["api_base"] = self.api_base

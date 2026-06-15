@@ -69,20 +69,44 @@ class ToolPolicy:
     When ``enabled_capabilities`` is ``None`` the policy is permissive (legacy
     behavior): every registered capability is allowed and nothing is gated. This
     preserves current behavior when no ``tools`` config block is present.
+
+    ``allowed_capabilities`` is an optional per-agent narrowing layer applied on
+    top of the global policy. When set, the final availability is the
+    intersection of the globally enabled capabilities and the agent's allowed
+    list. It is enforced even in permissive mode.
     """
 
     enabled_capabilities: set[str] | None
     risk_actions: dict[ToolRiskLevel, RiskAction]
+    allowed_capabilities: frozenset[str] | None = None
 
     @classmethod
     def permissive(cls) -> "ToolPolicy":
-        return cls(enabled_capabilities=None, risk_actions=dict(DEFAULT_RISK_ACTIONS))
+        return cls(
+            enabled_capabilities=None,
+            risk_actions=dict(DEFAULT_RISK_ACTIONS),
+            allowed_capabilities=None,
+        )
 
     @classmethod
-    def from_config(cls, config: "Config") -> "ToolPolicy":
+    def from_config(
+        cls,
+        config: "Config",
+        allowed_capabilities: list[str] | None = None,
+    ) -> "ToolPolicy":
+        agent_allowed = (
+            frozenset(allowed_capabilities)
+            if allowed_capabilities is not None
+            else None
+        )
+
         tools_cfg = getattr(config, "tools", None)
         if tools_cfg is None:
-            return cls.permissive()
+            return cls(
+                enabled_capabilities=None,
+                risk_actions=dict(DEFAULT_RISK_ACTIONS),
+                allowed_capabilities=agent_allowed,
+            )
 
         risk_actions = dict(DEFAULT_RISK_ACTIONS)
         for level, action in tools_cfg.risk_policy.items():
@@ -91,10 +115,17 @@ class ToolPolicy:
         return cls(
             enabled_capabilities=set(tools_cfg.enabled_capabilities),
             risk_actions=risk_actions,
+            allowed_capabilities=agent_allowed,
         )
 
     def resolve(self, capability: CapabilityDef) -> RiskAction | None:
         """Return the effective action for a capability, or None if excluded."""
+        # Per-agent narrowing applies even in permissive mode.
+        if (
+            self.allowed_capabilities is not None
+            and capability.id not in self.allowed_capabilities
+        ):
+            return None
         if self.enabled_capabilities is None:
             # Legacy/permissive: run everything as-is, no confirmation gating.
             return RiskAction.ALLOW

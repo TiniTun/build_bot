@@ -2,8 +2,6 @@
 
 from core.history import HistorySession
 
-
-import asyncio
 import json
 import uuid
 from dataclasses import dataclass, field
@@ -47,7 +45,9 @@ class Agent:
         capabilities = build_capability_registry(
             self.agent_def, self.context, include_post_message
         )
-        policy = ToolPolicy.from_config(self.context.config)
+        policy = ToolPolicy.from_config(
+            self.context.config, self.agent_def.allowed_capabilities
+        )
         return capabilities.build_tool_registry(policy)
 
     def _get_token_threshold(self) -> int:
@@ -201,9 +201,9 @@ class AgentSession:
         tool_calls: list["LLMToolCall"],
     ) -> None:
         """Handle tool calls from the LLM response."""
-        tool_call_results = await asyncio.gather(
-            *[self._execute_tool_call(tool_call) for tool_call in tool_calls]
-        )
+        tool_call_results = []
+        for tool_call in tool_calls:
+            tool_call_results.append(await self._execute_tool_call(tool_call))
 
         for tool_call, result in zip(tool_calls, tool_call_results):
             tool_msg: Message = {

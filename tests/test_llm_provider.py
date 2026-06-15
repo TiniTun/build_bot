@@ -67,6 +67,25 @@ class LLMProviderChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["temperature"], 0.42)
         self.assertEqual(kwargs["max_tokens"], 1234)
 
+    async def test_chat_omits_temperature_for_gpt5_models(self) -> None:
+        provider = LLMProvider(
+            model="gpt-5.5",
+            api_key="sk-test",
+            temperature=0.7,
+            max_tokens=1234,
+        )
+
+        with patch(
+            "provider.llm.base.acompletion",
+            new=AsyncMock(return_value=_fake_response()),
+        ) as mock_acompletion:
+            await provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+        kwargs = mock_acompletion.await_args.kwargs
+        self.assertEqual(kwargs["model"], "gpt-5.5")
+        self.assertNotIn("temperature", kwargs)
+        self.assertEqual(kwargs["max_tokens"], 1234)
+
     async def test_chat_forwards_extra_settings(self) -> None:
         config = LLMConfig(
             provider="anthropic",

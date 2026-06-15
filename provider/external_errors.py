@@ -19,3 +19,7 @@ class ProviderPermissionError(ExternalProviderError):
 
 class ProviderNotFoundError(ExternalProviderError):
     """Requested resource was not found by the provider."""
+
+
+class ProviderInvalidRequestError(ExternalProviderError):
+    """Provider rejected the request as malformed (e.g. HTTP 400)."""

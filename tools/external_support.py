@@ -6,6 +6,7 @@ or raw provider messages to the LLM.
 
 from provider.external_errors import (
     AuthMissingError,
+    ProviderInvalidRequestError,
     ProviderNotFoundError,
     ProviderPermissionError,
 )
@@ -30,6 +31,15 @@ def provider_exception_to_result(exc: Exception) -> ToolResult:
         return ToolResult.error(
             ToolErrorCode.NOT_FOUND,
             "The requested resource was not found.",
+        )
+    if isinstance(exc, ProviderInvalidRequestError):
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            "The provider rejected the request as malformed.",
+            user_action=(
+                "Provide RFC3339 datetimes with a UTC offset (e.g. "
+                "2026-06-16T10:00:00+10:00), or set a valid 'timezone' in config."
+            ),
         )
     # Unknown failure: do not surface the raw message (may contain secrets).
     return ToolResult.error(

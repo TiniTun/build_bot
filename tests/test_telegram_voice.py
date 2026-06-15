@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from pydantic import ValidationError
+from telegram.constants import ParseMode
 
 from channel.telegram_channel import TelegramChannel
 from utils.config import Config, TelegramConfig, TelegramVoiceConfig
@@ -278,6 +279,69 @@ class ProcessVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "ok")
         self.assertTrue(download.called)
         self.assertFalse(reply.called)
+
+
+class FakeBot:
+    """Records send_message calls; optionally fails the first HTML attempt."""
+
+    def __init__(self, fail_html_with: Exception | None = None):
+        self.calls: list[dict] = []
+        self._fail_html_with = fail_html_with
+
+    async def send_message(self, **kwargs):
+        self.calls.append(kwargs)
+        if (
+            self._fail_html_with is not None
+            and kwargs.get("parse_mode") is not None
+            and len(self.calls) == 1
+        ):
+            raise self._fail_html_with
+
+
+class ReplyHtmlFallbackTests(unittest.IsolatedAsyncioTestCase):
+    def _channel_with_bot(self, bot: FakeBot) -> TelegramChannel:
+        channel = make_channel()
+        channel.application = SimpleNamespace(bot=bot)
+        return channel
+
+    async def test_invalid_html_falls_back_to_plain_text(self):
+        from telegram.error import BadRequest
+
+        bot = FakeBot(
+            fail_html_with=BadRequest(
+                'Can\'t parse entities: unsupported start tag "action_id"'
+            )
+        )
+        channel = self._channel_with_bot(bot)
+        source = SimpleNamespace(chat_id="100")
+
+        await channel.reply("/confirm <action_id>", source)
+
+        self.assertEqual(len(bot.calls), 2)
+        self.assertEqual(bot.calls[0]["parse_mode"], ParseMode.HTML)
+        self.assertIsNone(bot.calls[1]["parse_mode"])
+        self.assertEqual(bot.calls[1]["text"], "/confirm <action_id>")
+
+    async def test_valid_html_sends_once(self):
+        bot = FakeBot()
+        channel = self._channel_with_bot(bot)
+        source = SimpleNamespace(chat_id="100")
+
+        await channel.reply("<b>hi</b>", source)
+
+        self.assertEqual(len(bot.calls), 1)
+        self.assertEqual(bot.calls[0]["parse_mode"], ParseMode.HTML)
+
+    async def test_non_parse_bad_request_propagates(self):
+        from telegram.error import BadRequest
+
+        bot = FakeBot(fail_html_with=BadRequest("chat not found"))
+        channel = self._channel_with_bot(bot)
+        source = SimpleNamespace(chat_id="100")
+
+        with self.assertRaises(BadRequest):
+            await channel.reply("hello", source)
+        self.assertEqual(len(bot.calls), 1)
 
 
 class VoiceConfigTests(unittest.TestCase):

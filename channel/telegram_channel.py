@@ -5,11 +5,24 @@ from dataclasses import dataclass
 import logging
 from collections.abc import Callable, Awaitable
 
-from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.error import BadRequest
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
+)
 
 from core.events import EventSource
 from channel.base import Channel
+from channel.confirmations import (
+    ConfirmationPrompt,
+    callback_to_command,
+    parse_confirmation,
+)
 from provider.audio.base import AudioTranscriber
 from provider.audio.ffmpeg import FfmpegError, ogg_to_wav
 from utils.config import TelegramConfig
@@ -153,6 +166,52 @@ class TelegramChannel(Channel[TelegramEventSource]):
         except Exception as e:
             logger.error(f"Error in voice message callback: {e}")
 
+    async def _handle_callback_update(
+        self,
+        update: Update,
+        on_message: Callable[[str, "TelegramEventSource"], Awaitable[None]],
+    ) -> None:
+        """Route a confirmation button click through the normal command flow.
+
+        The click is answered immediately, the keyboard is disabled to avoid a
+        duplicate submission, and the equivalent ``/confirm <id>`` / ``/reject
+        <id>`` command is dispatched via ``on_message`` so it follows the exact
+        same routing (and allowlist) as a typed message.
+        """
+        query = update.callback_query
+        if not query:
+            return
+
+        # Answer fast so Telegram stops showing the loading spinner.
+        try:
+            await query.answer()
+        except Exception as e:  # noqa: BLE001 - answering is best-effort
+            logger.debug("Failed to answer callback query: %s", e)
+
+        command = callback_to_command(query.data)
+        if not command:
+            logger.debug("Ignoring unrecognized callback data")
+            return
+
+        chat = query.message.chat if query.message else None
+        if not query.from_user or not chat:
+            return
+
+        source = TelegramEventSource(
+            user_id=str(query.from_user.id), chat_id=str(chat.id)
+        )
+
+        # Disable the buttons on the original message to prevent re-clicks.
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception as e:  # noqa: BLE001 - editing is best-effort
+            logger.debug("Failed to clear inline keyboard: %s", e)
+
+        try:
+            await on_message(command, source)
+        except Exception as e:
+            logger.error(f"Error in callback message callback: {e}")
+
     async def _process_voice(
         self,
         *,
@@ -229,10 +288,15 @@ class TelegramChannel(Channel[TelegramEventSource]):
             """Handle incoming Telegram voice message."""
             await self._handle_voice_update(update, on_message)
 
+        async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+            """Handle an inline-button (confirmation) click."""
+            await self._handle_callback_update(update, on_message)
+
         text_handler = MessageHandler(filters.TEXT, handle_message)
         self.application.add_handler(text_handler)
         voice_handler = MessageHandler(filters.VOICE, handle_voice)
         self.application.add_handler(voice_handler)
+        self.application.add_handler(CallbackQueryHandler(handle_callback))
 
         # Start the bot
         await self.application.initialize()
@@ -258,15 +322,61 @@ class TelegramChannel(Channel[TelegramEventSource]):
         self._running_task = asyncio.create_task(run_until_stopped())
         await self._running_task
 
+    @staticmethod
+    def _build_confirmation_keyboard(
+        prompt: ConfirmationPrompt,
+    ) -> InlineKeyboardMarkup:
+        """Build the Confirm/Reject inline keyboard for a pending action."""
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Confirm", callback_data=f"confirm:{prompt.confirm_id}"
+                    ),
+                    InlineKeyboardButton(
+                        "Reject", callback_data=f"reject:{prompt.reject_id}"
+                    ),
+                ]
+            ]
+        )
+
     async def reply(self, content: str, source: TelegramEventSource) -> None:
         """Reply to incoming message."""
         if not self.application:
             raise RuntimeError("TelegramChannel not started")
 
+        # Replace any "/confirm <id>" / "/reject <id>" instructions with inline
+        # buttons so users tap instead of copying commands.
+        text, prompt = parse_confirmation(content)
+        reply_markup: InlineKeyboardMarkup | None = None
+        if prompt is not None:
+            reply_markup = self._build_confirmation_keyboard(prompt)
+            # The buttons need a message body even if the text was all commands.
+            text = text or "Please confirm the pending action:"
+
         try:
-            await self.application.bot.send_message(
-                chat_id=int(source.chat_id), text=content
-            )
+            try:
+                await self.application.bot.send_message(
+                    chat_id=int(source.chat_id),
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup,
+                )
+            except BadRequest as e:
+                # Not all outbound text is valid Telegram HTML (e.g. slash-command
+                # output like "/confirm <action_id>" contains literal angle
+                # brackets). Rather than fail delivery, resend as plain text.
+                if "parse entities" not in str(e).lower():
+                    raise
+                logger.warning(
+                    "Telegram HTML parse failed (%s); resending as plain text", e
+                )
+                await self.application.bot.send_message(
+                    chat_id=int(source.chat_id),
+                    text=text,
+                    parse_mode=None,
+                    reply_markup=reply_markup,
+                )
             logger.debug(f"Sent Telegram reply to {source.chat_id}")
         except Exception as e:
             logger.error(f"Failed to send Telegram reply: {e}")
