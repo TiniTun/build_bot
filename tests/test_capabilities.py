@@ -93,6 +93,8 @@ class CapabilityCatalogTests(unittest.TestCase):
                     "memory_search",
                     "memory_store_fact",
                     "memory_store_preference",
+                    "memory_update_user_profile",
+                    "memory_update_assistant_preferences",
                     "memory_store_project_context",
                     "memory_store_decision",
                     "memory_append_daily_note",
@@ -397,6 +399,38 @@ class ConfirmationFlowTests(unittest.TestCase):
                 )
             )
             self.assertTrue(json.loads(raw)["requires_confirmation"])
+
+    def test_cron_create_job_is_trusted_write_under_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = _context(workspace)
+            context.config.tools = ToolsConfig(
+                enabled_capabilities=["cron.create_job"],
+                risk_policy={"confirm_required": "require_confirmation"},
+            )
+            caps = build_capability_registry(
+                _agent_def(context), context, include_post_message=False
+            )
+            registry = caps.build_tool_registry(ToolPolicy.from_config(context.config))
+            tool_obj = registry.get("create_cron_job")
+            self.assertNotIsInstance(tool_obj, ConfirmationRequiredTool)
+
+            raw = asyncio.run(
+                tool_obj.execute(
+                    session=_session(context),
+                    name="Smoke cron test",
+                    description="Smoke cron test reminder.",
+                    agent="pickle",
+                    schedule="*/10 * * * *",
+                    prompt="Remind the user: smoke cron test",
+                    one_off=False,
+                )
+            )
+
+            self.assertIn("Created cron job `smoke-cron-test`", raw)
+            self.assertTrue(
+                (workspace / "crons" / "smoke-cron-test" / "CRON.md").is_file()
+            )
 
 
 class ExternalAuthMissingTests(unittest.IsolatedAsyncioTestCase):

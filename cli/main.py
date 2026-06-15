@@ -77,6 +77,25 @@ def server(ctx: typer.Context) -> None:
     server_command(ctx)
 
 
+@app.command("migrate-memory")
+def migrate_memory(ctx: typer.Context) -> None:
+    """Create canonical memory files and copy old profile data forward.
+
+    Non-destructive: old files (topics/, daily-notes/) are left in place.
+    """
+    from core.memory_store import MemoryStore
+
+    cfg: Config = ctx.obj["config"]
+    actions = MemoryStore(cfg).migrate()
+
+    if not actions:
+        console.print("[green]Memory layout already up to date.[/green]")
+        return
+    for action in actions:
+        console.print(f"[green]•[/green] {action}")
+    console.print(f"\n[green]Migration complete:[/green] {len(actions)} action(s).")
+
+
 @app.command("validate-skills")
 def validate_skills(ctx: typer.Context) -> None:
     """Validate every SKILL.md in the workspace against the Skills v2 contract."""

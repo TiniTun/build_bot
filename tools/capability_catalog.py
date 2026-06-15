@@ -79,7 +79,7 @@ def _builtin_capabilities() -> list[tuple[CapabilityDef, object]]:
                 domain="cron",
                 operation="create_job",
                 description="Create a scheduled cron job.",
-                risk_level=ToolRiskLevel.CONFIRM_REQUIRED,
+                risk_level=ToolRiskLevel.WRITE,
                 enabled_by_default=True,
             ),
             create_cron_job,

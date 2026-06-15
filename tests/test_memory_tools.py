@@ -35,6 +35,8 @@ class MemoryToolsTests(unittest.TestCase):
                     "memory.search": "memory_search",
                     "memory.store_fact": "memory_store_fact",
                     "memory.store_preference": "memory_store_preference",
+                    "memory.update_user_profile": "memory_update_user_profile",
+                    "memory.update_assistant_preferences": "memory_update_assistant_preferences",
                     "memory.store_project_context": "memory_store_project_context",
                     "memory.store_decision": "memory_store_decision",
                     "memory.append_daily_note": "memory_append_daily_note",

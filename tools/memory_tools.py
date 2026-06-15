@@ -26,8 +26,10 @@ def build_memory_capabilities(
     @tool(
         name="memory_search",
         description=(
-            "Search stored memories (facts, preferences, projects, decisions, "
-            "daily notes) and return matching snippets."
+            "Search all memory areas (canonical profile/preferences/projects "
+            "plus raw facts, decisions, episodes, and legacy folders) and "
+            "return matching snippets with their source path. Canonical hits "
+            "rank above raw-log hits."
         ),
         parameters={
             "type": "object",
@@ -42,22 +44,14 @@ def build_memory_capabilities(
             "required": ["query"],
         },
     )
-    async def memory_search(
-        query: str, session: "AgentSession", limit: int = 10
-    ) -> str:
+    async def memory_search(query: str, session: "AgentSession", limit: int = 10) -> str:
         try:
             hits = store.search(query, limit)
         except ValueError as e:
-            return ToolResult.error(
-                ToolErrorCode.INVALID_ARGS, str(e)
-            ).to_tool_content()
+            return ToolResult.error(ToolErrorCode.INVALID_ARGS, str(e)).to_tool_content()
         if not hits:
-            return ToolResult.success(
-                "No matching memories found."
-            ).to_tool_content()
-        lines = [
-            f"- [{h.category}] {h.path}: {h.snippet}" for h in hits
-        ]
+            return ToolResult.success("No matching memories found.").to_tool_content()
+        lines = [f"- [{h.category}] {h.path}: {h.snippet}" for h in hits]
         return ToolResult.success("\n".join(lines)).to_tool_content()
 
     @tool(
@@ -75,12 +69,8 @@ def build_memory_capabilities(
         try:
             path = store.store_fact(content)
         except ValueError as e:
-            return ToolResult.error(
-                ToolErrorCode.INVALID_ARGS, str(e)
-            ).to_tool_content()
-        return ToolResult.success(
-            f"Fact stored in {path.name}."
-        ).to_tool_content()
+            return ToolResult.error(ToolErrorCode.INVALID_ARGS, str(e)).to_tool_content()
+        return ToolResult.success(f"Fact stored in {path.name}.").to_tool_content()
 
     @tool(
         name="memory_store_preference",
@@ -96,24 +86,16 @@ def build_memory_capabilities(
             "required": ["content"],
         },
     )
-    async def memory_store_preference(
-        content: str, session: "AgentSession"
-    ) -> str:
+    async def memory_store_preference(content: str, session: "AgentSession") -> str:
         try:
             path = store.store_preference(content)
         except ValueError as e:
-            return ToolResult.error(
-                ToolErrorCode.INVALID_ARGS, str(e)
-            ).to_tool_content()
-        return ToolResult.success(
-            f"Preference stored in {path.name}."
-        ).to_tool_content()
+            return ToolResult.error(ToolErrorCode.INVALID_ARGS, str(e)).to_tool_content()
+        return ToolResult.success(f"Preference stored in {path.name}.").to_tool_content()
 
     @tool(
         name="memory_store_project_context",
-        description=(
-            "Store project-specific context. Requires a project identifier."
-        ),
+        description=("Store project-specific context. Requires a project identifier."),
         parameters={
             "type": "object",
             "properties": {
@@ -129,9 +111,7 @@ def build_memory_capabilities(
             "required": ["project", "content"],
         },
     )
-    async def memory_store_project_context(
-        project: str, content: str, session: "AgentSession"
-    ) -> str:
+    async def memory_store_project_context(project: str, content: str, session: "AgentSession") -> str:
         if not project or not project.strip():
             return ToolResult.error(
                 ToolErrorCode.INVALID_ARGS,
@@ -140,12 +120,80 @@ def build_memory_capabilities(
         try:
             path = store.store_project_context(project, content)
         except ValueError as e:
-            return ToolResult.error(
-                ToolErrorCode.INVALID_ARGS, str(e)
-            ).to_tool_content()
-        return ToolResult.success(
-            f"Project context stored in {path.name}."
-        ).to_tool_content()
+            return ToolResult.error(ToolErrorCode.INVALID_ARGS, str(e)).to_tool_content()
+        return ToolResult.success(f"Project context stored in {path.name}.").to_tool_content()
+
+    @tool(
+        name="memory_update_user_profile",
+        description=(
+            "Update the canonical user profile (profile/user.md) with a single "
+            "field, e.g. identity/location/timezone. Replaces any existing value "
+            "for the same key so the profile stays the single source of truth."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "key": {
+                    "type": "string",
+                    "description": "Field name, e.g. 'Home city' or 'Timezone'.",
+                },
+                "value": {
+                    "type": "string",
+                    "description": "Field value, e.g. 'Brisbane, Australia'.",
+                },
+                "section": {
+                    "type": "string",
+                    "description": ("Profile section heading, e.g. 'Identity' or 'Location'. Defaults to 'Identity'."),
+                    "default": "Identity",
+                },
+            },
+            "required": ["key", "value"],
+        },
+    )
+    async def memory_update_user_profile(
+        key: str, value: str, session: "AgentSession", section: str = "Identity"
+    ) -> str:
+        try:
+            path = store.update_user_profile(key, value, section=section)
+        except ValueError as e:
+            return ToolResult.error(ToolErrorCode.INVALID_ARGS, str(e)).to_tool_content()
+        rel = path.relative_to(store.root).as_posix()
+        return ToolResult.success(f"User profile updated in {rel} ({section}: {key}).").to_tool_content()
+
+    @tool(
+        name="memory_update_assistant_preferences",
+        description=(
+            "Update the canonical assistant preferences (preferences/"
+            "assistant.md) with how the assistant should behave (style, tone, "
+            "tooling, workflow). Skips exact duplicates."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The preference statement to record.",
+                },
+                "section": {
+                    "type": "string",
+                    "description": (
+                        "Section heading, e.g. 'Communication' or 'Tools And Workflow'. Defaults to 'General'."
+                    ),
+                    "default": "General",
+                },
+            },
+            "required": ["content"],
+        },
+    )
+    async def memory_update_assistant_preferences(
+        content: str, session: "AgentSession", section: str = "General"
+    ) -> str:
+        try:
+            path = store.update_assistant_preference(content, section=section)
+        except ValueError as e:
+            return ToolResult.error(ToolErrorCode.INVALID_ARGS, str(e)).to_tool_content()
+        rel = path.relative_to(store.root).as_posix()
+        return ToolResult.success(f"Assistant preferences updated in {rel} ({section}).").to_tool_content()
 
     @tool(
         name="memory_store_decision",
@@ -166,18 +214,12 @@ def build_memory_capabilities(
             "required": ["content"],
         },
     )
-    async def memory_store_decision(
-        content: str, session: "AgentSession", rationale: str = ""
-    ) -> str:
+    async def memory_store_decision(content: str, session: "AgentSession", rationale: str = "") -> str:
         try:
             path = store.store_decision(content, rationale)
         except ValueError as e:
-            return ToolResult.error(
-                ToolErrorCode.INVALID_ARGS, str(e)
-            ).to_tool_content()
-        return ToolResult.success(
-            f"Decision stored in {path.name}."
-        ).to_tool_content()
+            return ToolResult.error(ToolErrorCode.INVALID_ARGS, str(e)).to_tool_content()
+        return ToolResult.success(f"Decision stored in {path.name}.").to_tool_content()
 
     @tool(
         name="memory_append_daily_note",
@@ -193,18 +235,12 @@ def build_memory_capabilities(
             "required": ["content"],
         },
     )
-    async def memory_append_daily_note(
-        content: str, session: "AgentSession"
-    ) -> str:
+    async def memory_append_daily_note(content: str, session: "AgentSession") -> str:
         try:
             path = store.append_daily_note(content)
         except ValueError as e:
-            return ToolResult.error(
-                ToolErrorCode.INVALID_ARGS, str(e)
-            ).to_tool_content()
-        return ToolResult.success(
-            f"Daily note appended to {path.name}."
-        ).to_tool_content()
+            return ToolResult.error(ToolErrorCode.INVALID_ARGS, str(e)).to_tool_content()
+        return ToolResult.success(f"Daily note appended to {path.name}.").to_tool_content()
 
     return [
         (
@@ -250,6 +286,28 @@ def build_memory_capabilities(
                 risk_level=ToolRiskLevel.WRITE,
             ),
             memory_store_project_context,
+        ),
+        (
+            CapabilityDef(
+                id="memory.update_user_profile",
+                tool_name="memory_update_user_profile",
+                domain="memory",
+                operation="update_user_profile",
+                description="Update the canonical user profile.",
+                risk_level=ToolRiskLevel.WRITE,
+            ),
+            memory_update_user_profile,
+        ),
+        (
+            CapabilityDef(
+                id="memory.update_assistant_preferences",
+                tool_name="memory_update_assistant_preferences",
+                domain="memory",
+                operation="update_assistant_preferences",
+                description="Update the canonical assistant preferences.",
+                risk_level=ToolRiskLevel.WRITE,
+            ),
+            memory_update_assistant_preferences,
         ),
         (
             CapabilityDef(
