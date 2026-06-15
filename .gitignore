@@ -22,8 +22,7 @@ pyrightconfig.json
 
 default_workspace/config.user.yaml
 default_workspace/config.runtime.yaml
-# skills
-default_workspace/skills/*
+
 default_workspace/.history/
 default_workspace/.logs/
 default_workspace/.event/

@@ -65,7 +65,9 @@ def create_skill_tool(skill_loader: "SkillLoader"):
                 parts.append(f"- `{path}` — {ref.description} (load {ref.when_to_load})")
 
         if skill_def.scripts:
-            parts.append("\n## Scripts (run these on demand with the bash tool)")
+            parts.append(
+                "\n## Scripts (run these on demand with the skill_run_script tool)"
+            )
             for script in skill_def.scripts:
                 path = (skill_dir / script.path).resolve()
                 parts.append(f"- `{path}` — {script.description} (run {script.when_to_run})")

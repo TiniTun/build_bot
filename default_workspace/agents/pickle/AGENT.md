@@ -5,6 +5,7 @@ allow_skills: true
 allowed_capabilities:
   - agent.subagent_dispatch
   - skills.invoke
+  - skills.run_script
   - cron.create_job
 llm:
   temperature: 0.7

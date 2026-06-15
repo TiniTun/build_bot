@@ -22,6 +22,7 @@ from tools.email_tools import (
 )
 from tools.memory_tools import build_memory_capabilities
 from tools.post_message_tool import create_post_message_tool
+from tools.skill_run_script_tool import create_skill_run_script_tool
 from tools.skill_tool import create_skill_tool
 from tools.subagent_tool import create_subagent_dispatch_tool
 from tools.webread_tool import create_webread_tool
@@ -125,6 +126,21 @@ def build_capability_registry(
                     enabled_by_default=True,
                 ),
                 skill_tool,
+            )
+
+        run_script_tool = create_skill_run_script_tool(context.skill_loader)
+        if run_script_tool:
+            registry.register(
+                CapabilityDef(
+                    id="skills.run_script",
+                    tool_name="skill_run_script",
+                    domain="skills",
+                    operation="run_script",
+                    description="Run a script declared in a skill's SKILL.md.",
+                    risk_level=ToolRiskLevel.WRITE,
+                    enabled_by_default=True,
+                ),
+                run_script_tool,
             )
 
     websearch_tool = create_websearch_tool(config)
