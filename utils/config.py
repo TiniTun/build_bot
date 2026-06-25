@@ -11,6 +11,18 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+class LLMDebugConfig(BaseModel):
+    """Local LLM trace-logging toggles.
+
+    When ``enabled`` is true, one redacted JSONL record per request is written
+    under ``<logging_path>/llm-traces/``. ``include_content`` is opt-in only and
+    additionally records message/output content; it never affects the request.
+    """
+
+    enabled: bool = False
+    include_content: bool = False
+
+
 class LLMConfig(BaseModel):
     """LLM configuration.
 
@@ -27,6 +39,7 @@ class LLMConfig(BaseModel):
     temperature: float = Field(default=0.7, ge=0., le=2.0)
     max_tokens: int = Field(default=2048, ge=0)
     extra: dict[str, Any] = Field(default_factory=dict)
+    debug: LLMDebugConfig = Field(default_factory=LLMDebugConfig)
 
     @field_validator("model")
     @classmethod
@@ -134,11 +147,25 @@ class ExternalProviderConfig(BaseModel):
     calendar_id: str | None = None
 
 
+class TasksProviderConfig(BaseModel):
+    """Configuration for the tasks domain (e.g. Todoist).
+
+    Unlike the Google domains, the tasks provider authenticates with a single API
+    token read from the environment variable named by ``api_token_env`` so the
+    secret never lives in config files.
+    """
+
+    provider: str | None = "todoist"
+    enabled: bool = False
+    api_token_env: str = "TODOIST_API_TOKEN"
+
+
 class ExternalToolsConfig(BaseModel):
     """External provider toggles. Disabled by default."""
 
     email: ExternalProviderConfig = Field(default_factory=ExternalProviderConfig)
     calendar: ExternalProviderConfig = Field(default_factory=ExternalProviderConfig)
+    tasks: TasksProviderConfig = Field(default_factory=TasksProviderConfig)
 
 
 class MemoryConfig(BaseModel):

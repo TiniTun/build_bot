@@ -25,6 +25,10 @@ from tools.post_message_tool import create_post_message_tool
 from tools.skill_run_script_tool import create_skill_run_script_tool
 from tools.skill_tool import create_skill_tool
 from tools.subagent_tool import create_subagent_dispatch_tool
+from tools.task_tools import (
+    build_task_capabilities,
+    build_task_confirmed_executors,
+)
 from tools.webread_tool import create_webread_tool
 from tools.websearch_tool import create_websearch_tool
 
@@ -210,6 +214,8 @@ def build_capability_registry(
         registry.register(capability, tool)
     for capability, tool in build_calendar_capabilities(config):
         registry.register(capability, tool)
+    for capability, tool in build_task_capabilities(config):
+        registry.register(capability, tool)
     for capability, tool in build_memory_capabilities(config):
         registry.register(capability, tool)
 
@@ -227,4 +233,5 @@ def build_confirmed_executor_registry(config: "Config") -> ConfirmedExecutorRegi
     registry = ConfirmedExecutorRegistry()
     registry.merge(build_email_confirmed_executors(config))
     registry.merge(build_calendar_confirmed_executors(config))
+    registry.merge(build_task_confirmed_executors(config))
     return registry

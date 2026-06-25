@@ -1,12 +1,14 @@
+import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from core.agent_loader import AgentLoader
 from provider.llm import LLMProvider
-from utils.config import Config, LLMConfig
+from utils.config import Config, LLMConfig, LLMDebugConfig
 
 from tests.helpers import make_workspace, write_definition
 
@@ -104,6 +106,144 @@ class LLMProviderChatTests(unittest.IsolatedAsyncioTestCase):
         kwargs = mock_acompletion.await_args.kwargs
         self.assertEqual(kwargs["model"], "anthropic/claude-opus-4.8")
         self.assertEqual(kwargs["top_p"], 0.8)
+
+
+class LLMTraceTests(unittest.IsolatedAsyncioTestCase):
+    def _provider(self, tmp: str, *, include_content: bool = False, **extra):
+        return LLMProvider(
+            model="gpt-4",
+            api_key="sk-secret-DO-NOT-LOG",
+            debug=LLMDebugConfig(enabled=True, include_content=include_content),
+            logging_path=Path(tmp),
+            agent_id="pickle",
+            **extra,
+        )
+
+    def _trace_lines(self, tmp: str) -> list[dict]:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        path = Path(tmp) / "llm-traces" / f"{day}.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
+    async def test_store_true_is_forwarded_to_acompletion(self) -> None:
+        config = LLMConfig(
+            provider="openai",
+            model="gpt-4",
+            api_key="sk-test",
+            extra={"store": True},
+        )
+        provider = LLMProvider.from_config(config)
+        with patch(
+            "provider.llm.base.acompletion",
+            new=AsyncMock(return_value=_fake_response()),
+        ) as mock_acompletion:
+            await provider.chat(messages=[{"role": "user", "content": "hi"}])
+        self.assertIs(mock_acompletion.await_args.kwargs["store"], True)
+
+    async def test_trace_written_when_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = self._provider(tmp, store=True)
+            with patch(
+                "provider.llm.base.acompletion",
+                new=AsyncMock(return_value=_fake_response("hello there")),
+            ):
+                await provider.chat(
+                    messages=[{"role": "user", "content": "hi"}],
+                    trace_session_id="sess-1",
+                )
+            records = self._trace_lines(tmp)
+            self.assertEqual(len(records), 1)
+            rec = records[0]
+            self.assertTrue(rec["success"])
+            self.assertEqual(rec["agent_id"], "pickle")
+            self.assertEqual(rec["session_id"], "sess-1")
+            self.assertEqual(rec["model"], "gpt-4")
+            self.assertEqual(rec["messages_count"], 1)
+            self.assertEqual(rec["store"], True)
+            self.assertIn("store", rec["request_keys"])
+            self.assertEqual(rec["output_length"], len("hello there"))
+            self.assertIn("trace_id", rec)
+            self.assertIsInstance(rec["latency_ms"], (int, float))
+
+    async def test_no_trace_when_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = LLMProvider(
+                model="gpt-4",
+                api_key="sk-test",
+                debug=LLMDebugConfig(enabled=False),
+                logging_path=Path(tmp),
+            )
+            with patch(
+                "provider.llm.base.acompletion",
+                new=AsyncMock(return_value=_fake_response()),
+            ):
+                await provider.chat(messages=[{"role": "user", "content": "hi"}])
+            self.assertFalse((Path(tmp) / "llm-traces").exists())
+
+    async def test_api_key_never_appears_in_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            # Even with content opted in, the api key must not leak anywhere.
+            provider = self._provider(tmp, include_content=True)
+            with patch(
+                "provider.llm.base.acompletion",
+                new=AsyncMock(return_value=_fake_response()),
+            ):
+                await provider.chat(
+                    messages=[{"role": "user", "content": "hi"}]
+                )
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            raw = (Path(tmp) / "llm-traces" / f"{day}.jsonl").read_text()
+            self.assertNotIn("sk-secret-DO-NOT-LOG", raw)
+
+    async def test_content_omitted_unless_opted_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = self._provider(tmp, include_content=False)
+            with patch(
+                "provider.llm.base.acompletion",
+                new=AsyncMock(return_value=_fake_response("secret-output")),
+            ):
+                await provider.chat(
+                    messages=[{"role": "user", "content": "secret-input"}]
+                )
+            rec = self._trace_lines(tmp)[0]
+            self.assertNotIn("messages", rec)
+            self.assertNotIn("output", rec)
+            raw_path = Path(tmp) / "llm-traces"
+            day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            raw = (raw_path / f"{day}.jsonl").read_text()
+            self.assertNotIn("secret-input", raw)
+            self.assertNotIn("secret-output", raw)
+
+    async def test_content_included_when_opted_in(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = self._provider(tmp, include_content=True)
+            with patch(
+                "provider.llm.base.acompletion",
+                new=AsyncMock(return_value=_fake_response("answer")),
+            ):
+                await provider.chat(
+                    messages=[{"role": "user", "content": "the-question"}]
+                )
+            rec = self._trace_lines(tmp)[0]
+            self.assertEqual(rec["output"], "answer")
+            self.assertEqual(rec["messages"][0]["content"], "the-question")
+
+    async def test_error_path_writes_failed_trace_without_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = self._provider(tmp)
+            boom = RuntimeError("auth failed for sk-secret-DO-NOT-LOG")
+            with patch(
+                "provider.llm.base.acompletion",
+                new=AsyncMock(side_effect=boom),
+            ):
+                with self.assertRaises(RuntimeError):
+                    await provider.chat(
+                        messages=[{"role": "user", "content": "hi"}]
+                    )
+            rec = self._trace_lines(tmp)[0]
+            self.assertFalse(rec["success"])
+            self.assertEqual(rec["error_type"], "RuntimeError")
+            self.assertNotIn("sk-secret-DO-NOT-LOG", rec["error"])
+            self.assertIn("***", rec["error"])
 
 
 class AgentLoaderLLMOverrideTests(unittest.TestCase):

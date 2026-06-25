@@ -11,6 +11,12 @@ llm:
   temperature: 0.7
   max_tokens: 2048
   # extra: {}                   # Optional provider-specific params passed to LiteLLM
+  # Local LLM request tracing. Writes one redacted JSONL record per request to
+  # <logging_path>/llm-traces/YYYY-MM-DD.jsonl so you can inspect model calls
+  # without OpenAI Platform logs. API keys are never written.
+  # debug:
+  #   enabled: true             # default false; turn on local trace logging
+  #   include_content: false    # opt-in: also log message/output content (sensitive)
 
   # --- Anthropic Opus through LiteLLM (alternative) ---
   # provider: anthropic
@@ -68,12 +74,18 @@ default_agent: pickle
 #     scopes:
 #       - https://www.googleapis.com/auth/calendar.readonly
 #       - https://www.googleapis.com/auth/calendar.events
+#   tasks:
+#     enabled: false
+#     provider: todoist
+#     # The API token is read from this environment variable, never from config.
+#     # Create one at https://todoist.com/app/settings/integrations/developer
+#     api_token_env: TODOIST_API_TOKEN
 # tools:
 #   # When enabled_capabilities is set, only listed dotted ids are available. The
 #   # final per-agent tool set is the intersection of this list and the agent's
 #   # own allowed_capabilities (see agents/<id>/AGENT.md). Cookie needs the
 #   # memory.* ids here, or the memory manager ends up with no functional tools.
-#   enabled_capabilities: [memory.search, memory.store_fact, memory.store_preference, memory.store_project_context, memory.store_decision, memory.append_daily_note, email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event]
+#   enabled_capabilities: [memory.search, memory.store_fact, memory.store_preference, memory.store_project_context, memory.store_decision, memory.append_daily_note, email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event, tasks.quick_add, tasks.inbox, tasks.today, tasks.overdue, tasks.search, tasks.update, tasks.complete, tasks.delete, tasks.bulk_update]
 #   risk_policy: {read: allow, draft: allow, confirm_required: require_confirmation}
 
 # Opt-in durable-memory workflows. Both default to false (no runtime behavior).
