@@ -32,6 +32,11 @@ default_agent: pickle
 #   provider: brave
 #   api_key: your-brave-search-api-key
 
+# Google Places API (New). Get a key: https://developers.google.com/maps/documentation/places/web-service
+# places:
+#   provider: google_places
+#   api_key: your-google-places-api-key
+
 # webread:
 #   provider: crawl4ai
 
@@ -71,6 +76,10 @@ default_agent: pickle
 #     credentials_path: /path/to/file/client_secret.json
 #     token_path: /path/to/file/calendar_token.json
 #     calendar_id: primary
+#     # Off by default. When true, calendar_search geocodes each event's location
+#     # (via the places provider) and appends Apple/Google map links. Requires the
+#     # places: block above to be configured.
+#     geocode_locations: false
 #     scopes:
 #       - https://www.googleapis.com/auth/calendar.readonly
 #       - https://www.googleapis.com/auth/calendar.events

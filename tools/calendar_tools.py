@@ -6,6 +6,7 @@ confirmation-gated: invoking it records a pending action and returns a
 in this iteration, so it cannot mutate external state without confirmation.
 """
 
+import logging
 import uuid
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ from pydantic import ValidationError
 
 from core.pending_actions import PendingActionStore
 from provider.calendar import CreateEventRequest, get_calendar_provider
+from provider.places import build_map_links
 from tools.base import BaseTool, ToolErrorCode, ToolResult, tool
 from tools.capabilities import CapabilityDef, ToolRiskLevel
 from tools.confirmed_executors import ConfirmedExecutor
@@ -20,7 +22,11 @@ from tools.external_support import provider_exception_to_result
 
 if TYPE_CHECKING:
     from core.agent import AgentSession
+    from provider.places import PlacesProvider
     from utils.config import Config
+
+
+logger = logging.getLogger(__name__)
 
 
 CREATE_EVENT_CAPABILITY_ID = "calendar.create_event"
@@ -30,6 +36,7 @@ DELETE_EVENT_CAPABILITY_ID = "calendar.delete_event"
 
 def build_calendar_capabilities(
     config: "Config",
+    places_provider: "PlacesProvider | None" = None,
 ) -> list[tuple[CapabilityDef, BaseTool]]:
     """Build calendar capability/tool pairs, or [] when calendar is disabled."""
     if not config.external_tools.calendar.enabled:
@@ -68,7 +75,27 @@ def build_calendar_capabilities(
             return provider_exception_to_result(e).to_tool_content()
         if not events:
             return ToolResult.success("No matching events found.").to_tool_content()
-        lines = [f"- {ev.title} ({ev.start} → {ev.end})" for ev in events]
+        geocode = config.external_tools.calendar.geocode_locations
+        lines = []
+        for ev in events:
+            line = f"- {ev.title} ({ev.start} → {ev.end})"
+            if geocode and places_provider is not None and ev.location:
+                try:
+                    matches = await places_provider.search(ev.location)
+                    if matches:
+                        p = matches[0]
+                        links = build_map_links(p.lat, p.lon, p.name, p.place_id)
+                        line += (
+                            f"\n  Apple Maps: {links.apple_maps_url}"
+                            f"\n  Google Maps: {links.google_maps_url}"
+                        )
+                except Exception:  # noqa: BLE001 - geocoding is best-effort
+                    # Non-blocking: skip links for this event, never fail the call.
+                    logger.debug(
+                        "geocoding failed for event location %r", ev.location,
+                        exc_info=True,
+                    )
+            lines.append(line)
         return ToolResult.success("\n".join(lines)).to_tool_content()
 
     @tool(

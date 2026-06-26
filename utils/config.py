@@ -91,6 +91,13 @@ class BraveWebSearchConfig(BaseModel):
     api_key: str
 
 
+class GooglePlacesConfig(BaseModel):
+    """Configuration for the places provider."""
+
+    provider: Literal["google_places"] = "google_places"
+    api_key: str
+
+
 class Crawl4AIWebReadConfig(BaseModel):
     """Configuration for web read provider."""
 
@@ -145,6 +152,9 @@ class ExternalProviderConfig(BaseModel):
     token_path: str | None = None
     scopes: list[str] = Field(default_factory=list)
     calendar_id: str | None = None
+    # Calendar-only: when true, calendar_search geocodes event locations to
+    # append Apple/Google map links. Off by default so it never burns quota.
+    geocode_locations: bool = False
 
 
 class TasksProviderConfig(BaseModel):
@@ -189,6 +199,7 @@ class Config(BaseModel):
     history_path: Path = Field(default=Path(".history"))
     event_path: Path = Field(default=Path(".event"))
     websearch: BraveWebSearchConfig | None = None
+    places: GooglePlacesConfig | None = None
     webread:Crawl4AIWebReadConfig | None = None
     channels: ChannelConfig = Field(default_factory=ChannelConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
