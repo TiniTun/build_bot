@@ -3,10 +3,19 @@
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.parse import quote
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 if TYPE_CHECKING:
     from utils.config import Config
+
+
+class PlaceReview(BaseModel):
+    """Normalized Google review excerpt with required author attribution."""
+
+    text: str
+    rating: float | None = None
+    author_name: str = "Google Maps user"
+    relative_publish_time: str | None = None
 
 
 class Place(BaseModel):
@@ -18,6 +27,9 @@ class Place(BaseModel):
     lon: float
     place_id: str
     rating: float | None = None
+    user_rating_count: int | None = None
+    serves_breakfast: bool | None = None
+    reviews: list[PlaceReview] = Field(default_factory=list)
 
 
 class MapLinks(BaseModel):
@@ -46,7 +58,16 @@ def build_map_links(lat: float, lon: float, name: str, place_id: str) -> MapLink
 class PlacesProvider(Protocol):
     """Text-search place lookup operations."""
 
-    async def search(self, query: str) -> list[Place]: ...
+    async def search(
+        self,
+        query: str,
+        *,
+        latitude: float | None = None,
+        longitude: float | None = None,
+        radius_m: float = 3000,
+        max_results: int = 10,
+        include_reviews: bool = False,
+    ) -> list[Place]: ...
 
 
 def get_places_provider(config: "Config") -> PlacesProvider:

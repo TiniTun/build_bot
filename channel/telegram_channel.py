@@ -166,6 +166,39 @@ class TelegramChannel(Channel[TelegramEventSource]):
         except Exception as e:
             logger.error(f"Error in voice message callback: {e}")
 
+    async def _handle_location_update(
+        self,
+        update: Update,
+        on_message: Callable[[str, "TelegramEventSource"], Awaitable[None]],
+    ) -> None:
+        """Convert a shared Telegram location into agent-readable coordinates."""
+        if not (
+            update.message
+            and update.message.location
+            and update.effective_chat
+            and update.message.from_user
+        ):
+            return
+
+        user_id = str(update.message.from_user.id)
+        chat_id = str(update.effective_chat.id)
+        source = TelegramEventSource(user_id=user_id, chat_id=chat_id)
+        location = update.message.location
+        message = (
+            "The user shared their current Telegram location for this request.\n"
+            f"Latitude: {location.latitude:.6f}\n"
+            f"Longitude: {location.longitude:.6f}\n"
+            "Use these coordinates as the search center."
+        )
+
+        logger.info(
+            "Received Telegram location from user %s in chat %s", user_id, chat_id
+        )
+        try:
+            await on_message(message, source)
+        except Exception as e:
+            logger.error(f"Error in location message callback: {e}")
+
     async def _handle_callback_update(
         self,
         update: Update,
@@ -288,6 +321,12 @@ class TelegramChannel(Channel[TelegramEventSource]):
             """Handle incoming Telegram voice message."""
             await self._handle_voice_update(update, on_message)
 
+        async def handle_location(
+            update: Update, context: ContextTypes.DEFAULT_TYPE
+        ):
+            """Handle an incoming Telegram location."""
+            await self._handle_location_update(update, on_message)
+
         async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """Handle an inline-button (confirmation) click."""
             await self._handle_callback_update(update, on_message)
@@ -296,6 +335,8 @@ class TelegramChannel(Channel[TelegramEventSource]):
         self.application.add_handler(text_handler)
         voice_handler = MessageHandler(filters.VOICE, handle_voice)
         self.application.add_handler(voice_handler)
+        location_handler = MessageHandler(filters.LOCATION, handle_location)
+        self.application.add_handler(location_handler)
         self.application.add_handler(CallbackQueryHandler(handle_callback))
 
         # Start the bot

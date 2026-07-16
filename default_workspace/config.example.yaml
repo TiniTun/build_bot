@@ -32,7 +32,9 @@ default_agent: pickle
 #   provider: brave
 #   api_key: your-brave-search-api-key
 
-# Google Places API (New). Get a key: https://developers.google.com/maps/documentation/places/web-service
+# Google Places API (New). Nearby recommendation searches request ratings and
+# review excerpts, which use the Enterprise + Atmosphere SKU.
+# Get a key: https://developers.google.com/maps/documentation/places/web-service
 # places:
 #   provider: google_places
 #   api_key: your-google-places-api-key

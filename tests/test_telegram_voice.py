@@ -75,8 +75,20 @@ class Recorder:
         return bool(self.calls)
 
 
-def make_update(*, user_id: str = "42", chat_id: str = "100", text=None, voice=None):
-    message = SimpleNamespace(text=text, voice=voice, from_user=SimpleNamespace(id=user_id))
+def make_update(
+    *,
+    user_id: str = "42",
+    chat_id: str = "100",
+    text=None,
+    voice=None,
+    location=None,
+):
+    message = SimpleNamespace(
+        text=text,
+        voice=voice,
+        location=location,
+        from_user=SimpleNamespace(id=user_id),
+    )
     return SimpleNamespace(message=message, effective_chat=SimpleNamespace(id=chat_id))
 
 
@@ -112,6 +124,25 @@ class TextMessageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(on_message.calls), 1)
         content, source = on_message.calls[0]
         self.assertEqual(content, "hello there")
+        self.assertEqual(source.user_id, "42")
+        self.assertEqual(source.chat_id, "100")
+
+
+class LocationMessageTests(unittest.IsolatedAsyncioTestCase):
+    async def test_location_dispatches_structured_coordinates(self):
+        channel = make_channel(transcriber=FakeTranscriber())
+        on_message = Recorder()
+        location = SimpleNamespace(latitude=-27.469770, longitude=153.025131)
+
+        await channel._handle_location_update(
+            make_update(location=location), on_message
+        )
+
+        self.assertEqual(len(on_message.calls), 1)
+        content, source = on_message.calls[0]
+        self.assertIn("Latitude: -27.469770", content)
+        self.assertIn("Longitude: 153.025131", content)
+        self.assertIn("search center", content)
         self.assertEqual(source.user_id, "42")
         self.assertEqual(source.chat_id, "100")
 

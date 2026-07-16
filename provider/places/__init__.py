@@ -3,6 +3,7 @@
 from .base import (
     MapLinks,
     Place,
+    PlaceReview,
     PlacesProvider,
     build_map_links,
     get_places_provider,
@@ -10,6 +11,7 @@ from .base import (
 
 __all__ = [
     "Place",
+    "PlaceReview",
     "MapLinks",
     "PlacesProvider",
     "build_map_links",

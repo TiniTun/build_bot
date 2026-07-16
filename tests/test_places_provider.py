@@ -58,6 +58,16 @@ class GooglePlacesProviderTests(unittest.IsolatedAsyncioTestCase):
                     "location": {"latitude": 37.7749, "longitude": -122.4194},
                     "id": "ChIJabc123",
                     "rating": 4.5,
+                    "userRatingCount": 321,
+                    "servesBreakfast": True,
+                    "reviews": [
+                        {
+                            "rating": 5,
+                            "text": {"text": "Excellent flat white and eggs."},
+                            "authorAttribution": {"displayName": "Alex"},
+                            "relativePublishTimeDescription": "a month ago",
+                        }
+                    ],
                 }
             ]
         }
@@ -75,6 +85,53 @@ class GooglePlacesProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(place.lon, -122.4194)
         self.assertEqual(place.place_id, "ChIJabc123")
         self.assertEqual(place.rating, 4.5)
+        self.assertEqual(place.user_rating_count, 321)
+        self.assertTrue(place.serves_breakfast)
+        self.assertEqual(len(place.reviews), 1)
+        self.assertEqual(place.reviews[0].author_name, "Alex")
+        self.assertEqual(place.reviews[0].text, "Excellent flat white and eggs.")
+
+    async def test_search_sends_location_bias_and_page_size(self) -> None:
+        fake_client = _patched_client({"places": []})
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            provider = GooglePlacesProvider(_fake_config())
+            await provider.search(
+                "breakfast cafe",
+                latitude=-27.4698,
+                longitude=153.0251,
+                radius_m=2500,
+                max_results=7,
+                include_reviews=True,
+            )
+
+        request = fake_client.post.await_args.kwargs
+        self.assertEqual(request["json"]["textQuery"], "breakfast cafe")
+        self.assertEqual(request["json"]["pageSize"], 7)
+        self.assertEqual(
+            request["json"]["locationBias"],
+            {
+                "circle": {
+                    "center": {
+                        "latitude": -27.4698,
+                        "longitude": 153.0251,
+                    },
+                    "radius": 2500,
+                }
+            },
+        )
+        self.assertIn("places.reviews", request["headers"]["X-Goog-FieldMask"])
+
+    async def test_search_omits_atmosphere_fields_by_default(self) -> None:
+        fake_client = _patched_client({"places": []})
+        with patch("httpx.AsyncClient", return_value=fake_client):
+            provider = GooglePlacesProvider(_fake_config())
+            await provider.search("123 Main Street")
+
+        field_mask = fake_client.post.await_args.kwargs["headers"][
+            "X-Goog-FieldMask"
+        ]
+        self.assertNotIn("places.reviews", field_mask)
+        self.assertNotIn("places.servesBreakfast", field_mask)
 
     async def test_search_missing_rating_and_location(self) -> None:
         payload = {

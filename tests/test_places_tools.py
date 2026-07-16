@@ -10,7 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import tools.places_tools as pt
-from provider.places import Place, build_map_links
+from provider.places import Place, PlaceReview, build_map_links
 from tests.helpers import make_context, make_workspace
 from tools.capabilities import ToolPolicy
 from tools.capability_catalog import build_capability_registry
@@ -21,8 +21,10 @@ from utils.config import GooglePlacesConfig
 class _FakeProvider:
     def __init__(self, places):
         self._places = places
+        self.calls = []
 
-    async def search(self, query):
+    async def search(self, query, **kwargs):
+        self.calls.append((query, kwargs))
         return self._places
 
 
@@ -106,6 +108,62 @@ class PlacesSearchToolTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Apple Maps:", output)
             self.assertIn("Google Maps:", output)
             self.assertNotIn("Rating:", output)
+
+    async def test_nearby_search_returns_review_evidence_and_distance(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = make_context(make_workspace(Path(tmp)))
+            context.config.places = GooglePlacesConfig(api_key="test")
+            place = Place(
+                name="Morning After",
+                address="Brisbane City",
+                lat=-27.4700,
+                lon=153.0250,
+                place_id="breakfast123",
+                rating=4.7,
+                user_rating_count=842,
+                serves_breakfast=True,
+                reviews=[
+                    PlaceReview(
+                        text="Great eggs, quick service, and consistently good coffee.",
+                        rating=5,
+                        author_name="Sam",
+                        relative_publish_time="2 weeks ago",
+                    )
+                ],
+            )
+            outside_radius = Place(
+                name="Far Away Cafe",
+                address="Gold Coast",
+                lat=-28.0167,
+                lon=153.4000,
+                place_id="far123",
+                rating=5.0,
+            )
+            fake_provider = _FakeProvider([place, outside_radius])
+            orig = pt.get_places_provider
+            pt.get_places_provider = lambda config: fake_provider
+            try:
+                tool_obj = _places_tool(context.config)
+                output = await tool_obj.execute(
+                    session=_session(context),
+                    query="good breakfast cafe",
+                    latitude=-27.4698,
+                    longitude=153.0251,
+                    radius_m=3000,
+                    limit=5,
+                )
+            finally:
+                pt.get_places_provider = orig
+
+            self.assertIn("Rating: 4.7 (842 ratings)", output)
+            self.assertIn("Distance:", output)
+            self.assertIn("Serves breakfast: yes", output)
+            self.assertIn("Sam, 2 weeks ago 5.0/5", output)
+            self.assertIn("Great eggs", output)
+            self.assertNotIn("Far Away Cafe", output)
+            self.assertEqual(fake_provider.calls[0][0], "good breakfast cafe")
+            self.assertEqual(fake_provider.calls[0][1]["latitude"], -27.4698)
+            self.assertTrue(fake_provider.calls[0][1]["include_reviews"])
 
     def test_disabled_when_no_places_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
