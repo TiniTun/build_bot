@@ -171,20 +171,6 @@ Output never contains credentials, URLs, tool arguments, or raw results.
   re-pointed servers are applied without a restart, and a removed or disabled
   server denies new calls before its connection is closed.
 
-### movies_db
-
-The first production profile is `movies_db` over Streamable HTTP. It enables six
-read operations plus three explicit, non-destructive writes:
-`movies_log_viewing`, `movies_update_viewing`, and `movies_record_feedback`.
-Those writes are locally classified as `effect: write`, are never retried, and
-run only when the user clearly asks to record or change movie data. Deletion is
-not allowlisted, and every unknown future tool stays quarantined.
-
-`MOVIES_DB_URL` is the **MCP endpoint** (`http://movies-db:8765/mcp` in Docker),
-not a repository or web URL. In a Docker deployment build-bot reaches it only
-over the external `mcp_internal` network, and the MCP port is never published to
-the host. See [docs/deployment.md](docs/deployment.md) for network creation,
-environment setup, and TLS guidance.
 
 ### Not supported yet
 
