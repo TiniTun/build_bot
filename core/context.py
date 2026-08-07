@@ -9,6 +9,7 @@ from core.prompt_builder import PromptBuilder
 from core.routing import RoutingTable
 from core.skill_loader import SkillLoader
 from core.eventbus import EventBus
+from provider.mcp.hub import McpHub
 from utils.config import Config
 
 if TYPE_CHECKING:
@@ -28,6 +29,7 @@ class SharedContext:
     prompt_builder: PromptBuilder
     channels: list[Channel[Any]]
     eventbus: EventBus
+    mcp_hub: McpHub
     websocket_worker: "WebSocketWorker | None"
 
     def __init__(
@@ -48,4 +50,7 @@ class SharedContext:
             self.channels = Channel.from_config(config)
         
         self.eventbus = EventBus(self)
+        # Constructed synchronously and holds no connection until `start()` is
+        # awaited by the CLI chat loop or the server, before any worker runs.
+        self.mcp_hub = McpHub(config)
         self.websocket_worker = None

@@ -35,6 +35,15 @@ class Server:
     async def run(self) -> None:
         """Start all workers and monitor for crashes."""
         self._setup_workers()
+
+        # Initial MCP discovery has to finish before workers can route work to an
+        # agent session, otherwise a session could be built without its tools.
+        try:
+            await self.context.mcp_hub.start()
+        except Exception:
+            self.config_reloader.stop()
+            raise
+
         self._start_workers()
 
         # Start API server if configured
@@ -101,6 +110,10 @@ class Server:
         """Stop all workers gracefully."""
         for worker in self.workers:
             await worker.stop()
+
+        # Close MCP sessions after workers so no in-flight call loses its client,
+        # and before the loop exits so no MCP task outlives the application.
+        await self.context.mcp_hub.stop()
 
         # Stop config reloader
         if self.config_reloader is not None:

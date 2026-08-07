@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 from pydantic import ValidationError
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, RetryAfter, TimedOut
 
+from channel import telegram_channel
 from channel.telegram_channel import TelegramChannel
 from utils.config import Config, TelegramConfig, TelegramVoiceConfig
 
@@ -310,6 +312,161 @@ class ProcessVoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "ok")
         self.assertTrue(download.called)
         self.assertFalse(reply.called)
+
+
+class FlakyVoice(FakeVoice):
+    """Fails ``get_file`` a set number of times before succeeding."""
+
+    def __init__(self, *, failures: int, error: Exception | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self.remaining_failures = failures
+        self.error = error or TimedOut()
+
+    async def get_file(self) -> FakeFile:
+        self.get_file_calls += 1
+        if self.remaining_failures > 0:
+            self.remaining_failures -= 1
+            raise self.error
+        return FakeFile(self._data)
+
+
+class VoiceDownloadFailureTests(unittest.IsolatedAsyncioTestCase):
+    """A network fault fetching the audio must never escape to the library.
+
+    Before this was handled, one connect timeout to api.telegram.org produced an
+    unhandled exception in python-telegram-bot and the user got no reply at all.
+    """
+
+    def setUp(self) -> None:
+        # Keep retry backoff out of the test's wall clock.
+        self._sleep = telegram_channel.asyncio.sleep
+        telegram_channel.asyncio.sleep = self._instant
+
+    def tearDown(self) -> None:
+        telegram_channel.asyncio.sleep = self._sleep
+
+    @staticmethod
+    async def _instant(_seconds: float) -> None:
+        return None
+
+    async def test_timeout_replies_instead_of_raising(self) -> None:
+        channel = make_channel(transcriber=FakeTranscriber())
+        reply = Recorder()
+        convert = Recorder(result=b"WAV")
+        download = Recorder(raises=TimedOut())
+
+        result = await channel._process_voice(
+            duration=1, file_size=10, download=download, reply=reply
+        )
+
+        self.assertIsNone(result)
+        self.assertTrue(reply.called)
+        self.assertIn("voice message", reply.calls[0][0])
+        self.assertFalse(convert.called)
+
+    async def test_generic_network_error_replies(self) -> None:
+        channel = make_channel(transcriber=FakeTranscriber())
+        reply = Recorder()
+        download = Recorder(raises=NetworkError("connection reset"))
+
+        result = await channel._process_voice(
+            duration=1, file_size=10, download=download, reply=reply
+        )
+
+        self.assertIsNone(result)
+        self.assertTrue(reply.called)
+
+    async def test_rate_limit_replies_rather_than_escaping(self) -> None:
+        channel = make_channel(transcriber=FakeTranscriber())
+        reply = Recorder()
+        download = Recorder(raises=RetryAfter(30))
+
+        result = await channel._process_voice(
+            duration=1, file_size=10, download=download, reply=reply
+        )
+
+        self.assertIsNone(result)
+        self.assertTrue(reply.called)
+
+    async def test_transcriber_never_runs_on_download_failure(self) -> None:
+        transcriber = FakeTranscriber()
+        channel = make_channel(transcriber=transcriber)
+        download = Recorder(raises=TimedOut())
+
+        await channel._process_voice(
+            duration=1, file_size=10, download=download, reply=Recorder()
+        )
+
+        self.assertEqual(transcriber.calls, [])
+
+    async def test_download_retries_and_succeeds(self) -> None:
+        voice = FlakyVoice(failures=2, data=b"OGG")
+
+        data = await TelegramChannel._download_voice_bytes(voice)
+
+        self.assertEqual(data, b"OGG")
+        self.assertEqual(voice.get_file_calls, 3)
+
+    async def test_download_gives_up_after_the_attempt_limit(self) -> None:
+        voice = FlakyVoice(failures=99)
+
+        with self.assertRaises(TimedOut):
+            await TelegramChannel._download_voice_bytes(voice)
+
+        self.assertEqual(
+            voice.get_file_calls, telegram_channel.VOICE_DOWNLOAD_ATTEMPTS
+        )
+
+    async def test_successful_download_does_not_retry(self) -> None:
+        voice = FakeVoice(data=b"OGG")
+
+        data = await TelegramChannel._download_voice_bytes(voice)
+
+        self.assertEqual(data, b"OGG")
+        self.assertEqual(voice.get_file_calls, 1)
+
+    async def test_rate_limit_is_not_retried_blindly(self) -> None:
+        voice = FlakyVoice(failures=99, error=RetryAfter(30))
+
+        with self.assertRaises(RetryAfter):
+            await TelegramChannel._download_voice_bytes(voice)
+
+        self.assertEqual(voice.get_file_calls, 1)
+
+    async def test_voice_handler_survives_a_download_failure(self) -> None:
+        """The whole handler path, as python-telegram-bot would drive it."""
+        channel = make_channel(transcriber=FakeTranscriber())
+        voice = FlakyVoice(failures=99)
+        update = make_update(voice=voice)
+        on_message = Recorder()
+        sent: list[str] = []
+
+        async def fake_reply(text, source):
+            sent.append(text)
+
+        channel.reply = fake_reply
+
+        # Must not raise: this is what reached python-telegram-bot before.
+        await channel._handle_voice_update(update, on_message)
+
+        self.assertFalse(on_message.called)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("voice message", sent[0])
+
+
+class TimeoutConfigTests(unittest.TestCase):
+    def test_connect_timeout_exceeds_the_library_default(self) -> None:
+        # PTB defaults to 5s, shorter than TCP's SYN retransmit schedule on a
+        # lossy long-haul path.
+        self.assertGreater(telegram_channel.TELEGRAM_CONNECT_TIMEOUT_SECONDS, 5.0)
+        self.assertGreaterEqual(
+            telegram_channel.TELEGRAM_READ_TIMEOUT_SECONDS,
+            telegram_channel.TELEGRAM_CONNECT_TIMEOUT_SECONDS,
+        )
+
+    def test_retry_budget_is_bounded(self) -> None:
+        self.assertGreaterEqual(telegram_channel.VOICE_DOWNLOAD_ATTEMPTS, 2)
+        self.assertLessEqual(telegram_channel.VOICE_DOWNLOAD_ATTEMPTS, 5)
 
 
 class FakeBot:

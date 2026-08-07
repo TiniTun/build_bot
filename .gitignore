@@ -8,8 +8,13 @@ wheels/
 
 # Virtual environments
 .venv
+.venv-*
+.uv-cache/
 .ruff_cache/
-uv.lock
+.pytest_cache/
+
+# uv.lock is intentionally tracked: the Docker build runs `uv sync --frozen`,
+# so a clone without the lockfile cannot produce a reproducible image.
 
 .vscode/
 *.code-workspace

@@ -54,13 +54,13 @@ uv run ruff format .
 ### Key layers
 
 **`core/`** — domain logic, no I/O
-- `SharedContext` — single shared-state object passed everywhere. Holds `history_store`, `agent_loader`, `skill_loader`, `command_registry`, `eventbus`.
+- `SharedContext` — single shared-state object passed everywhere. Holds `history_store`, `agent_loader`, `skill_loader`, `command_registry`, `eventbus`, `mcp_hub`.
 - `Agent` — creates/resumes `AgentSession`s. Reads agent definitions from the workspace.
 - `AgentSession` — orchestrates the LLM loop: send messages, handle tool calls, loop until no more tool calls.
 - `SessionState` — pure dataclass holding `messages: list[Message]` and a reference to `SharedContext`. Replaces itself when compacted.
 - `ContextGuard` — monitors token usage; triggers compaction when threshold is hit.
 - `EventBus` — async pub/sub queue. Lives in `core/` but extends `server.Worker`.
-- `core/commands/` — slash-command subsystem (`/help`, `/compact`, `/context`, `/session`, `/skills`). `CommandRegistry` is on `SharedContext`, not on `AgentSession`.
+- `core/commands/` — slash-command subsystem (`/help`, `/compact`, `/context`, `/session`, `/skills`, `/mcp`). `CommandRegistry` is on `SharedContext`, not on `AgentSession`.
 - `RoutingTable` — resolves source strings to agents, caches source-session affinity in runtime config, and clears stale cached sessions missing from history.
 - `CronLoader` — loads `<crons_path>/<cron-id>/CRON.md` definitions and validates cron schedules.
 - `SkillLoader` — Skills v2 loader/validator; invalid skills are logged and skipped during discovery, while `validate-skills` surfaces errors.
@@ -78,6 +78,7 @@ uv run ruff format .
 - `provider/llm/` — LiteLLM wrapper.
 - `provider/web_search/` — Brave Search.
 - `provider/web_read/` — Crawl4AI.
+- `provider/mcp/` — MCP client layer. `client.py` owns the only import of the MCP SDK; `models.py`/`errors.py` are the SDK-free vocabulary; `hub.py` is the process-level `McpHub`.
 
 **`tools/`** — LLM-callable tools
 - `ToolRegistry` — register/execute tools by name; the dispatch parameter is `tool_name` so tools may safely accept their own `name` argument.
@@ -90,6 +91,20 @@ uv run ruff format .
 - Capability IDs are dotted (`email.search`); LLM tool names are safe underscores (`email_search`). Web tools keep legacy names `websearch` / `webread`.
 - Slash-command handlers must access shared services via `session.shared_context`, not directly on `session` or `session.agent`.
 - `email_*` and `calendar_*` tools are hidden unless `external_tools.<domain>.enabled` and policy enable their capability; null providers return `auth_missing`.
+- `ToolRegistry.register` raises `ToolNameCollisionError` on a duplicate visible name; it is never last-write-wins.
+
+### MCP (remote tools)
+
+- `McpHub` on `SharedContext` owns all connections. Its `start()`/`stop()` are awaited by `cli/chat.py` and `server/server.py` — before workers start and after they stop.
+- Startup order per server is fixed: `/health` → initialize → `list_tools` → publish snapshot. Nothing is exposed before discovery completes.
+- Capability id `mcp.<server_id>.<tool>`; LLM name `mcp_<server_id>_<tool>` (sanitized, truncated, hash-suffixed on collision).
+- Discovery is fail-closed in `tools/mcp_tools.py`, not in `ToolPolicy`, so the allowlist holds even in permissive legacy mode. A tool the server adds later stays quarantined.
+- Server annotations/descriptions/instructions are untrusted; they never grant access or bypass confirmation. `use_server_instructions` is opt-in, per-agent, and size-capped.
+- Sessions get stable tool schemas; `McpTool.execute` re-checks `hub.is_tool_available` at call time.
+- No call is ever retried automatically. A timeout is ambiguous and is reported as non-retryable.
+- Bearer tokens come from `token_env` only, are attached to every request in the session, and are redacted from every error, log, and `/mcp` output.
+- Config hot-reload reaches the hub through `Config.add_reload_listener` → `McpHub.request_reconcile()`, which only signals the loop from the watchdog thread.
+- Tests use `tests/mcp_fakes.py`: `FakeMcpHttpServer` (real SDK over `httpx2.MockTransport`) for protocol facts, `FakeMcpClient` for lifecycle and policy.
 
 **`utils/`**
 - `Config` — Pydantic model merged from `<workspace>/config.user.yaml` and optional `config.runtime.yaml`.
@@ -133,7 +148,7 @@ uv run ruff format .
 
 A workspace is a directory containing:
 ```
-config.user.yaml      # LLM keys, default_agent, optional websearch/webread/channels/api/tools/external_tools
+config.user.yaml      # LLM keys, default_agent, optional websearch/webread/channels/api/tools/external_tools/mcp
 config.runtime.yaml   # mutable runtime state; generated/updated by the app
 agents/<id>/AGENT.md  # YAML frontmatter (name, llm overrides, allow_skills) + system prompt body
 skills/<id>/SKILL.md  # Skills v2 frontmatter + body

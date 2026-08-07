@@ -72,6 +72,7 @@ class CommandRegistry:
             BindingsCommand,
             ConfirmCommand,
             RejectCommand,
+            McpCommand,
         )
 
         registry = cls()
@@ -87,4 +88,5 @@ class CommandRegistry:
         registry.register(BindingsCommand())
         registry.register(ConfirmCommand())
         registry.register(RejectCommand())
+        registry.register(McpCommand())
         return registry

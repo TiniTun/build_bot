@@ -7,7 +7,7 @@ from collections.abc import Callable, Awaitable
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.error import BadRequest
+from telegram.error import BadRequest, NetworkError, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -31,6 +31,17 @@ logger = logging.getLogger(__name__)
 
 # Converts OGG/Opus voice bytes to a transcription-friendly WAV container.
 FfmpegConverter = Callable[[bytes], Awaitable[bytes]]
+
+# Voice downloads are idempotent reads, so a bounded retry is safe. Telegram
+# connect failures tend to come in bursts of a few seconds.
+VOICE_DOWNLOAD_ATTEMPTS = 3
+VOICE_DOWNLOAD_BACKOFF_SECONDS = 1.0
+
+# python-telegram-bot defaults to a 5s connect timeout, which is tighter than
+# TCP's SYN retransmission schedule on a lossy long-haul path.
+TELEGRAM_CONNECT_TIMEOUT_SECONDS = 20.0
+TELEGRAM_READ_TIMEOUT_SECONDS = 30.0
+TELEGRAM_MEDIA_TIMEOUT_SECONDS = 60.0
 
 
 @dataclass
@@ -84,10 +95,37 @@ class TelegramChannel(Channel[TelegramEventSource]):
 
     @staticmethod
     async def _download_voice_bytes(voice) -> bytes:
-        """Download Telegram voice file bytes."""
-        file = await voice.get_file()
-        data = await file.download_as_bytearray()
-        return bytes(data)
+        """Download Telegram voice file bytes, retrying transient network faults.
+
+        Connect timeouts to ``api.telegram.org`` arrive in short bursts on a
+        home uplink, so a single attempt fails a message that a retry a second
+        later would have fetched. Both calls here are idempotent reads, so a
+        retry cannot duplicate an effect. Rate limiting (``RetryAfter``) is left
+        to the caller rather than being retried blindly.
+        """
+        last_error: NetworkError | None = None
+        for attempt in range(VOICE_DOWNLOAD_ATTEMPTS):
+            try:
+                file = await voice.get_file()
+                data = await file.download_as_bytearray()
+                return bytes(data)
+            except NetworkError as e:
+                last_error = e
+                remaining = VOICE_DOWNLOAD_ATTEMPTS - attempt - 1
+                if not remaining:
+                    break
+                delay = VOICE_DOWNLOAD_BACKOFF_SECONDS * (2**attempt)
+                logger.warning(
+                    "Voice download attempt %d/%d failed (%s); retrying in %.1fs",
+                    attempt + 1,
+                    VOICE_DOWNLOAD_ATTEMPTS,
+                    e,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+
+        assert last_error is not None
+        raise last_error
 
     async def _handle_text_update(
         self,
@@ -274,7 +312,19 @@ class TelegramChannel(Channel[TelegramEventSource]):
             await reply("That voice message is too large.")
             return None
 
-        audio = await download()
+        try:
+            audio = await download()
+        except TelegramError as e:
+            # Fetching the file is a separate round trip to Telegram and can
+            # fail on its own (connect timeouts to api.telegram.org are common
+            # on a flaky home uplink). Without this the exception escapes to
+            # python-telegram-bot, which has no error handler, and the user gets
+            # silence instead of an answer.
+            logger.error("Voice download failed: %s", e)
+            await reply(
+                "I couldn't download that voice message. Please try again, or send it as text."
+            )
+            return None
 
         try:
             wav = await self._ffmpeg_convert(audio)
@@ -310,8 +360,28 @@ class TelegramChannel(Channel[TelegramEventSource]):
             raise RuntimeError("TelegramChannel already running")
 
         logger.info(f"Channel enabled with platform: {self.platform_name}")
-        self.application = Application.builder().token(self.config.bot_token).build()
+        # Telegram's API is reached over a long, lossy path from a home uplink
+        # (hundreds of ms RTT, occasional packet loss). The library's 5s default
+        # connect timeout is shorter than TCP's own SYN retransmission schedule,
+        # so one dropped SYN is enough to fail a request that would have
+        # succeeded. Give the handshake room to recover.
+        self.application = (
+            Application.builder()
+            .token(self.config.bot_token)
+            .connect_timeout(TELEGRAM_CONNECT_TIMEOUT_SECONDS)
+            .read_timeout(TELEGRAM_READ_TIMEOUT_SECONDS)
+            .media_write_timeout(TELEGRAM_MEDIA_TIMEOUT_SECONDS)
+            .build()
+        )
         self._stop_event = asyncio.Event()
+
+        async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE):
+            """Last-resort handler so no exception is left unhandled.
+
+            Without a registered handler, python-telegram-bot logs
+            "No error handlers are registered" and the user is left with silence.
+            """
+            logger.error("Unhandled Telegram handler error: %s", context.error)
 
         async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             """Handle incoming Telegram text message."""
@@ -338,6 +408,7 @@ class TelegramChannel(Channel[TelegramEventSource]):
         location_handler = MessageHandler(filters.LOCATION, handle_location)
         self.application.add_handler(location_handler)
         self.application.add_handler(CallbackQueryHandler(handle_callback))
+        self.application.add_error_handler(handle_error)
 
         # Start the bot
         await self.application.initialize()

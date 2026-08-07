@@ -1,0 +1,40 @@
+# Keep secrets, runtime state, and local environments out of the build context.
+
+# Local virtual environments (never valid inside the image)
+.venv
+.venv-*
+.uv-cache
+
+# VCS and editor state
+.git
+.gitignore
+.vscode
+*.code-workspace
+.claude
+pyrightconfig.json
+
+# Python build artifacts
+__pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+wheels
+.ruff_cache
+
+# Workspace secrets and runtime state. The workspace is mounted at runtime
+# (see compose.yaml), so none of it belongs in an image layer.
+default_workspace
+!default_workspace/config.example.yaml
+
+# Credentials that must never reach an image layer
+*.local.toml
+*.local.json
+client_secret*.json
+*_token.json
+.env
+.env.*
+
+# Docs and tests are not needed to run the server
+docs
+tests

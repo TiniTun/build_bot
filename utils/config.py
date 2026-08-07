@@ -2,14 +2,20 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
+
+from utils.mcp_config import (
+    McpConfig,
+    McpServerConfig,
+    McpToolPolicy,
+)
 
 class LLMDebugConfig(BaseModel):
     """Local LLM trace-logging toggles.
@@ -204,12 +210,23 @@ class Config(BaseModel):
     channels: ChannelConfig = Field(default_factory=ChannelConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     tools: ToolsConfig | None = None
+    # Absent => no MCP runtime is started and behavior is unchanged.
+    mcp: McpConfig | None = None
     external_tools: ExternalToolsConfig = Field(default_factory=ExternalToolsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
     routing: dict = Field(default_factory=lambda: {"bindings": []})
     default_delivery_source: str | None = None
     timezone: str | None = None
+
+    # Notified after a successful in-place reload. Callbacks run on whatever
+    # thread triggered the reload (the watchdog observer thread for file
+    # changes), so a listener must only signal — never block or do async work.
+    _reload_listeners: list[Callable[[], None]] = PrivateAttr(default_factory=list)
+
+    def add_reload_listener(self, callback: Callable[[], None]) -> None:
+        """Register a non-blocking callback invoked after each successful reload."""
+        self._reload_listeners.append(callback)
 
     @field_validator("timezone")
     @classmethod
@@ -335,11 +352,18 @@ class Config(BaseModel):
             # Update all fields from new config
             for field_name in Config.model_fields:
                 setattr(self, field_name, getattr(new_config, field_name))
-
-            return True
         except Exception as e:
             logging.debug("Config reload failed: %s", e)
             return False
+
+        # Listeners run only after the new values are in place, and a failing
+        # listener must not make a successful reload look like a failure.
+        for listener in self._reload_listeners:
+            try:
+                listener()
+            except Exception:
+                logging.exception("Config reload listener failed")
+        return True
 
 
 class ConfigHandler(FileSystemEventHandler):
