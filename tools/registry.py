@@ -9,6 +9,10 @@ if TYPE_CHECKING:
     from core.agent import AgentSession
 
 
+class ToolNameCollisionError(ValueError):
+    """Two different tools claimed the same LLM-visible name."""
+
+
 class ToolRegistry:
     """Registry for all available tools."""
 
@@ -17,7 +21,18 @@ class ToolRegistry:
         self._tools: dict[str, BaseTool] = {}
 
     def register(self, tool: BaseTool) -> None:
-        """Register a tool."""
+        """Register a tool.
+
+        A name clash is an error, never last-write-wins: silently replacing an
+        entry would let a newly discovered remote tool shadow a built-in.
+        """
+        existing = self._tools.get(tool.name)
+        if existing is not None and existing is not tool:
+            raise ToolNameCollisionError(
+                f"Tool name '{tool.name}' is already registered by "
+                f"{type(existing).__name__}; refusing to replace it with "
+                f"{type(tool).__name__}"
+            )
         self._tools[tool.name] = tool
 
     def get(self, name: str) -> BaseTool | None:

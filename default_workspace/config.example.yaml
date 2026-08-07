@@ -96,8 +96,61 @@ default_agent: pickle
 #   # final per-agent tool set is the intersection of this list and the agent's
 #   # own allowed_capabilities (see agents/<id>/AGENT.md). Cookie needs the
 #   # memory.* ids here, or the memory manager ends up with no functional tools.
-#   enabled_capabilities: [memory.search, memory.store_fact, memory.store_preference, memory.store_project_context, memory.store_decision, memory.append_daily_note, email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event, tasks.quick_add, tasks.inbox, tasks.today, tasks.overdue, tasks.search, tasks.update, tasks.complete, tasks.delete, tasks.bulk_update]
-#   risk_policy: {read: allow, draft: allow, confirm_required: require_confirmation}
+#   enabled_capabilities: [memory.search, memory.store_fact, memory.store_preference, memory.store_project_context, memory.store_decision, memory.append_daily_note, email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event, tasks.quick_add, tasks.inbox, tasks.today, tasks.overdue, tasks.search, tasks.update, tasks.complete, tasks.delete, tasks.bulk_update, mcp.movies_db.movies_get_taste_profile, mcp.movies_db.movies_get_viewing, mcp.movies_db.movies_recommend, mcp.movies_db.movies_resolve_title, mcp.movies_db.movies_search_library, mcp.movies_db.movies_search_catalog, mcp.movies_db.movies_log_viewing, mcp.movies_db.movies_update_viewing, mcp.movies_db.movies_record_feedback]
+#   risk_policy: {read: allow, draft: allow, confirm_required: require_confirmation, write: allow}
+
+# Remote MCP (Model Context Protocol) servers. Omit this block entirely to keep
+# the bot's behavior exactly as it was before MCP support existed.
+#
+# Discovery is fail-closed: only the exact remote tool names in `allowed_tools`
+# are ever exposed to an agent. Anything else the server advertises now or adds
+# later stays quarantined until an operator lists it here. Server-supplied
+# descriptions, annotations, and instructions are untrusted hints and can never
+# grant access, lower risk, or bypass confirmation.
+#
+# Secrets are never written here. `token_env` names the environment variable
+# holding the Bearer token; it is read only when connecting, and its value never
+# reaches logs, errors, /mcp output, or the model.
+# mcp:
+#   servers:
+#     movies_db:
+#       enabled: true
+#       transport: streamable_http       # the only supported transport today
+#       # Give exactly one of `url` or `url_env`. In Docker the deployed value is
+#       # http://movies-db:8765/mcp, reachable only over the private mcp_internal
+#       # network (the MCP port is never published to the host).
+#       url_env: MOVIES_DB_URL
+#       token_env: MOVIES_DB_TOKEN       # env var NAME, never the token itself
+#       # Unauthenticated liveness probe run before every MCP initialization.
+#       # `health_path` resolves against the MCP URL's origin; use `health_url`
+#       # instead for a health endpoint on a different host.
+#       health_path: /health
+#       required: false                  # optional: an outage degrades only this server
+#       connect_timeout_seconds: 10
+#       read_timeout_seconds: 30
+#       discovery_timeout_seconds: 20
+#       health_timeout_seconds: 5
+#       max_concurrent_calls: 4
+#       max_result_chars: 20000          # model-visible result cap
+#       allowed_tools:                   # exact remote names; the entire allowlist
+#         - movies_get_taste_profile
+#         - movies_get_viewing
+#         - movies_recommend
+#         - movies_resolve_title
+#         - movies_search_library
+#         - movies_search_catalog
+#         - movies_log_viewing
+#         - movies_update_viewing
+#         - movies_record_feedback
+#       denied_tools:                    # destructive operations stay unavailable
+#         - movies_delete_viewing
+#       # Optional local per-tool overrides. Defaults are the safest choice:
+#       # effect: read, confirmation: none, retry: never.
+#       tool_policies:
+#         movies_log_viewing: {effect: write, confirmation: none, retry: never}
+#         movies_update_viewing: {effect: write, confirmation: none, retry: never}
+#         movies_record_feedback: {effect: write, confirmation: none, retry: never}
+#       use_server_instructions: false   # keep untrusted server guidance out of prompts
 
 # Opt-in durable-memory workflows. Both default to false (no runtime behavior).
 # memory:

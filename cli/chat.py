@@ -74,6 +74,10 @@ class ChatLoop:
 
         self.config_reloader.start()
 
+        # MCP discovery must complete before any session is created, so an agent
+        # never races a half-built tool catalog.
+        await self.context.mcp_hub.start()
+
         for worker in self.workers:
             worker.start()
 
@@ -114,6 +118,7 @@ class ChatLoop:
         finally:
             for worker in self.workers:
                 await worker.stop()
+            await self.context.mcp_hub.stop()
 
 
 def chat_command(ctx: typer.Context, agent_id: str | None = None) -> None:

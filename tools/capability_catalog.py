@@ -14,12 +14,18 @@ from tools.calendar_tools import (
     build_calendar_capabilities,
     build_calendar_confirmed_executors,
 )
-from tools.capabilities import CapabilityDef, CapabilityRegistry, ToolRiskLevel
+from tools.capabilities import (
+    CapabilityDef,
+    CapabilityRegistry,
+    ConfirmationRequiredTool,
+    ToolRiskLevel,
+)
 from tools.confirmed_executors import ConfirmedExecutorRegistry
 from tools.email_tools import (
     build_email_capabilities,
     build_email_confirmed_executors,
 )
+from tools.mcp_tools import build_mcp_capabilities
 from tools.memory_tools import build_memory_capabilities
 from tools.places_tools import build_places_capabilities
 from tools.post_message_tool import create_post_message_tool
@@ -228,6 +234,14 @@ def build_capability_registry(
     for capability, tool in build_task_capabilities(config):
         registry.register(capability, tool)
     for capability, tool in build_memory_capabilities(config):
+        registry.register(capability, tool)
+
+    # MCP tools are gated here rather than by ToolPolicy so they stay fail-closed
+    # even in permissive legacy mode (no `tools:` block). Only tools an operator
+    # listed by exact name reach this point at all.
+    for capability, tool in build_mcp_capabilities(context):
+        if capability.risk_level is ToolRiskLevel.CONFIRM_REQUIRED:
+            tool = ConfirmationRequiredTool(capability, tool)
         registry.register(capability, tool)
 
     return registry

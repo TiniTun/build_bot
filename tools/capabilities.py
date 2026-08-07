@@ -203,7 +203,11 @@ class CapabilityRegistry:
             if action is None:
                 continue
             tool = self._tools[cap_id]
-            if action is RiskAction.REQUIRE_CONFIRMATION:
+            if action is RiskAction.REQUIRE_CONFIRMATION and not isinstance(
+                tool, ConfirmationRequiredTool
+            ):
+                # Some tools (MCP) are gated at registration so they stay
+                # fail-closed in permissive mode; do not wrap them twice.
                 tool = ConfirmationRequiredTool(capability, tool)
             registry.register(tool)
         return registry

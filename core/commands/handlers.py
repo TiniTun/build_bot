@@ -1,6 +1,7 @@
 """Built-in slash command handlers."""
 
 import re
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from core.commands.base import Command
@@ -223,6 +224,92 @@ class CronsCommand(Command):
             f"\n---\n\n**CRON.md:**\n```\n{cron.prompt}\n```",
         ]
         return "\n".join(lines)
+
+
+class McpCommand(Command):
+    """Read-only diagnostics for configured MCP servers.
+
+    Output is deliberately compact and credential-free: it never contains a
+    token, a URL that could carry one, tool arguments, or raw results.
+    """
+
+    name = "mcp"
+    description = "Show MCP server status (/mcp [server_id])"
+
+    async def execute(self, args: str, session: "AgentSession") -> str:
+        hub = session.shared_context.mcp_hub
+        statuses = hub.statuses()
+        if not statuses:
+            return "No MCP servers configured."
+
+        server_id = args.strip()
+        if server_id:
+            status = hub.status(server_id)
+            if status is None:
+                known = ", ".join(f"`{s.server_id}`" for s in statuses)
+                return f"✗ MCP server `{server_id}` not found. Configured: {known}"
+            return self._detail(status, hub)
+
+        lines = ["**MCP servers:**"]
+        for status in statuses:
+            flags = "required" if status.required else "optional"
+            if not status.enabled:
+                flags += ", disabled"
+            summary = (
+                f"- `{status.server_id}` — {status.state.value} ({flags}); "
+                f"tools {status.enabled_tools}/{status.discovered_tools} enabled, "
+                f"{status.quarantined_tools} quarantined"
+            )
+            if status.last_error:
+                summary += f"; last error: {_short(status.last_error)}"
+            lines.append(summary)
+        return "\n".join(lines)
+
+    def _detail(self, status, hub) -> str:
+        lines = [
+            f"**MCP server:** `{status.server_id}`",
+            f"**State:** {status.state.value}",
+            f"**Enabled:** {status.enabled}",
+            f"**Required:** {status.required}",
+        ]
+        if status.server_name:
+            lines.append(f"**Server:** {status.server_name} {status.server_version or ''}".strip())
+        if status.last_discovery_at is not None:
+            stamp = datetime.fromtimestamp(status.last_discovery_at).isoformat(
+                timespec="seconds"
+            )
+            lines.append(f"**Last discovery:** {stamp}")
+        lines.append(
+            f"**Tools:** {status.discovered_tools} discovered, "
+            f"{status.enabled_tools} enabled, {status.quarantined_tools} quarantined"
+        )
+
+        snapshot = hub.snapshot(status.server_id)
+        server_config = hub.server_config(status.server_id)
+        if snapshot is not None and server_config is not None:
+            enabled = [
+                t.name for t in snapshot.tools if server_config.is_tool_allowed(t.name)
+            ]
+            quarantined = [
+                t.name
+                for t in snapshot.tools
+                if not server_config.is_tool_allowed(t.name)
+            ]
+            if enabled:
+                lines.append("**Enabled tools:** " + ", ".join(f"`{n}`" for n in enabled))
+            if quarantined:
+                lines.append(
+                    "**Quarantined:** " + ", ".join(f"`{n}`" for n in quarantined)
+                )
+        if status.last_error:
+            lines.append(f"**Last error:** {_short(status.last_error)}")
+        return "\n".join(lines)
+
+
+def _short(text: str, limit: int = 200) -> str:
+    """Keep an error summary to one readable line."""
+    collapsed = " ".join(text.split())
+    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
 
 
 class RouteCommand(Command):

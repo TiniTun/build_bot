@@ -48,10 +48,21 @@ class PromptBuilder:
             )
         )
 
-        # Layer 5: Channel hint
+        # Layer 5: Opt-in MCP server guidance (untrusted, clearly delimited)
+        mcp_layer = self._build_mcp_instructions(state)
+        if mcp_layer:
+            layers.append(mcp_layer)
+
+        # Layer 6: Channel hint
         layers.append(self._build_channel_hint(state.source))
 
         return "\n\n".join(layers)
+
+    def _build_mcp_instructions(self, state: "SessionState") -> str:
+        """Server-supplied usage guidance, only for servers that opted in."""
+        from tools.mcp_tools import build_mcp_instructions_layer
+
+        return build_mcp_instructions_layer(self.context, state.agent.agent_def)
 
     def _substitute_paths(self, text: str) -> str:
         """Replace {{placeholder}} tokens with resolved config paths."""

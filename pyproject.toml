@@ -13,6 +13,9 @@ dependencies = [
     "google-auth>=2.35.0",
     "google-auth-oauthlib>=1.2.1",
     "litellm>=1.83.0",
+    # MCP client SDK. Pinned to 2.x: the client layer uses the 2.0 API
+    # (`streamable_http_client`, `mcp_types`), which 1.x does not provide.
+    "mcp>=2.0.0,<3",
     "openai>=1.40.0",
     "pydantic>=2.12.5",
     "python-telegram-bot>=22.7",

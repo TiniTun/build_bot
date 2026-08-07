@@ -1,0 +1,44 @@
+# Deployment contract for build-bot.
+#
+# `movies_db` is reached only over the private, externally-managed `mcp_internal`
+# network under its service DNS name. Its MCP port is never published to the
+# host by this file, and the separate movies_db deployment must not publish it
+# either. See docs/deployment.md for the one-time network setup.
+
+name: build-bot
+
+services:
+  build-bot:
+    build:
+      context: .
+    image: build-bot:latest
+    restart: unless-stopped
+    # `--workspace` is a global Typer option, so it precedes the subcommand.
+    command: ["build-bot", "--workspace", "/workspace", "server"]
+    environment:
+      # Internal Docker DNS name on mcp_internal. Not reachable from the host.
+      MOVIES_DB_URL: http://movies-db:8765/mcp
+      # Required, with no default and no committed value: `docker compose up`
+      # fails fast rather than starting with an insecure placeholder.
+      MOVIES_DB_TOKEN: ${MOVIES_DB_TOKEN:?set MOVIES_DB_TOKEN in the deployment environment; it must match the movies_db server's MCP_API_TOKEN}
+    volumes:
+      # The workspace holds config.user.yaml, agents, skills, history, and
+      # events. It stays on the host so no secret enters an image layer.
+      - ./default_workspace:/workspace
+    ports:
+      # User-facing WebSocket API only. Bound to loopback by default; put a
+      # reverse proxy in front of it to expose it beyond this host.
+      # Requires `api.host: 0.0.0.0` in config.user.yaml so the container
+      # listens on its published interface.
+      - "127.0.0.1:8005:8005"
+    networks:
+      # Outbound access for the LLM provider, Telegram, and web tools.
+      - default
+      # Private path to movies_db.
+      - mcp_internal
+
+networks:
+  # Declared external so redeploying build-bot never recreates or deletes the
+  # network that other MCP servers are already attached to.
+  mcp_internal:
+    external: true
