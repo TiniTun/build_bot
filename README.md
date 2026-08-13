@@ -1,190 +1,624 @@
 # build-bot
 
-A personal AI assistant framework. Define agents in Markdown, extend them with skills and tools, and talk to them from the terminal, Telegram, or WebSocket.
+**A self-hosted AI assistant that you define in Markdown and use from the terminal, Telegram, or your own application.**
 
-## How it works
+build-bot turns an LLM into a long-running personal assistant: it keeps conversation history, routes requests between specialized agents, uses external services through tools, remembers durable context, and runs scheduled jobs. Agents, skills, and automations live in ordinary files inside a workspace, so the assistant remains inspectable and easy to customize.
 
-User input → `EventBus` → `AgentWorker` → `AgentSession` → LLM → response back through the same bus.
+The included workspace is not an empty demo. It contains a user-facing coordinator and specialists for memory, web research, Gmail, Google Calendar, Todoist, nearby-place search, and a movie library connected over MCP.
 
-Each agent is a folder with an `AGENT.md` file — YAML frontmatter for config, Markdown body for the system prompt.
+## What it can do
 
-## Setup
+- Run with any model supported by [LiteLLM](https://docs.litellm.ai/docs/providers), including OpenAI-compatible endpoints and Anthropic models.
+- Receive requests from CLI, Telegram, and WebSocket clients.
+- Handle Telegram text, voice messages, shared locations, and confirmation buttons.
+- Split work between multiple agents with different prompts, models, tools, and permissions.
+- Search and read the web, work with files, execute shell commands, and run skill-owned scripts.
+- Search Gmail, prepare replies, manage Google Calendar, work with Todoist, and find places with Google Places.
+- Connect remote MCP servers and expose only explicitly approved tools to selected agents.
+- Keep persistent conversation history and durable Markdown memory.
+- Run recurring jobs and one-off reminders in a configured timezone.
+- Require explicit confirmation before sensitive operations such as sending or deleting email, changing calendar events, or deleting tasks.
+- Reload most workspace configuration without restarting the process.
 
-```bash
-uv install
-cp default_workspace/config.example.yaml default_workspace/config.user.yaml
-# fill in your API key and model
+## How messages reach the assistant
+
+Every entry point is normalized into the same event pipeline:
+
+```text
+CLI / Telegram / WebSocket / cron
+                ↓
+             EventBus
+                ↓
+       routing + session history
+                ↓
+        agent → tools / specialists
+                ↓
+      reply to the originating channel
 ```
 
-### Choosing a model
+| Channel | Best suited for | Supported input |
+| --- | --- | --- |
+| **CLI** | Local setup, testing, and private interactive use | Text and slash commands |
+| **Telegram** | An always-available personal assistant | Text, voice notes, locations, confirmation buttons |
+| **WebSocket** | Web/mobile clients and integration into another product | JSON messages and streamed events |
+| **Cron** | Background work, recurring checks, and reminders | Scheduled prompts dispatched to an agent |
 
-Models are routed through [LiteLLM](https://docs.litellm.ai/docs/providers), so use
-the LiteLLM model string. `provider` is just a free-form label.
+Sessions are associated with their source, so a Telegram chat and a WebSocket client keep separate histories. Routing rules can send different users or source patterns to different agents.
 
-OpenAI-compatible model:
+## Included real-world setup
+
+The default workspace uses **Pickle** as the only user-facing agent. Pickle delegates focused work to specialists and combines their results into one reply.
+
+| Agent | Responsibility |
+| --- | --- |
+| `pickle` | User conversation, orchestration, reminders, and final answers |
+| `cookie` | Durable facts, preferences, project context, decisions, and daily notes |
+| `mail-assistant` | Gmail search, reading, triage, and reply drafting |
+| `calendar-assistant` | Agenda, availability, conflicts, meeting preparation, and event changes |
+| `task-assistant` | Todoist capture, lists, updates, completion, and guarded destructive actions |
+| `researcher` | Web research, source comparison, and nearby-place discovery |
+| `movie-assistant` | Movie-library search, viewing history, recommendations, and feedback through a remote MCP server |
+
+Examples of requests supported by this workspace after the corresponding providers are configured:
+
+```text
+Summarize my unread email and draft replies where the answer is obvious.
+
+What meetings do I have tomorrow, and are there any conflicts?
+
+Add "send the proposal Friday p1 #Work" to Todoist.
+
+Find three well-reviewed breakfast cafés within 3 km of this Telegram location.
+
+Remember that I prefer meetings after 10:00.
+
+Remind me tomorrow at 08:30 to take the documents.
+
+Compare the current options for X and cite the sources.
+
+Recommend a movie based on my viewing history and explain why it fits.
+```
+
+The assistant can combine these capabilities. For example, it can retrieve a stored scheduling preference, ask the calendar specialist for availability, prepare an event change, and wait for `/confirm <action_id>` before applying it.
+
+## Quick start
+
+### Requirements
+
+- An API key for the LLM provider you want to use
+- For a local installation: Python 3.11 or newer and [uv](https://docs.astral.sh/uv/)
+- Alternatively: Docker Engine with Docker Compose
+- Optional: `ffmpeg` for Telegram voice messages
+
+Clone the project and install its dependencies:
+
+```bash
+git clone https://github.com/TiniTun/build_bot.git
+cd build_bot
+uv sync
+```
+
+Create your local configuration:
+
+```bash
+cp default_workspace/config.example.yaml default_workspace/config.user.yaml
+```
+
+At minimum, set the model and API key in `default_workspace/config.user.yaml`:
 
 ```yaml
 llm:
   provider: openai
-  model: gpt-4
+  model: gpt-4.1
   api_key: sk-...
   temperature: 0.7
-  max_tokens: 2048
-```
-
-Anthropic Opus through LiteLLM:
-
-```yaml
-llm:
-  provider: anthropic
-  model: anthropic/claude-opus-4.8
-  api_key: sk-ant-...
-  temperature: 0.7
   max_tokens: 4096
+
+default_agent: pickle
+timezone: Australia/Brisbane
 ```
 
-Provider-specific parameters can be passed through `extra:`, which is forwarded
-verbatim to LiteLLM. Per-agent overrides go in the agent's `AGENT.md` frontmatter
-under `llm:` and are merged over these defaults.
+`provider` is a descriptive label; LiteLLM selects the actual backend from `model`. A custom OpenAI-compatible endpoint can be set with `api_base`. Individual agents may override the global model and generation settings in their `AGENT.md` frontmatter.
 
-## Usage
+Start a local chat:
 
 ```bash
-build-bot chat
-build-bot chat --agent my-agent --workspace ./my-workspace
-build-bot server   # start the 24/7 event-driven server
+uv run build-bot chat
 ```
 
-## Workspace layout
+Use another workspace or agent:
 
-```
-my-workspace/
-├── config.user.yaml
-├── agents/<id>/AGENT.md
-└── skills/<id>/SKILL.md
+```bash
+uv run build-bot --workspace ./my-workspace chat --agent my-agent
 ```
 
-## Remote tools over MCP
+`--workspace` is a global option and must appear before the subcommand.
 
-build-bot can act as an MCP (Model Context Protocol) **client**: it connects to
-remote MCP servers, discovers the tools they advertise, and exposes the ones you
-approve as ordinary agent tools. There is no separate execution path — an
-approved remote tool goes through the same capability registry, policy, and
-confirmation machinery as a built-in.
+## Running channels
 
-Omit the `mcp:` block entirely and nothing changes: no connections are opened
-and every existing tool behaves exactly as before.
+### CLI
 
-### Configuring servers
+The CLI is the smallest working setup and does not require the long-running server:
 
-Add one entry per server under `mcp.servers`. See
-`default_workspace/config.example.yaml` for the fully commented version.
+```bash
+uv run build-bot --workspace ./default_workspace chat
+```
+
+Type `/help` in a conversation to see the available commands. Useful commands include `/agent`, `/skills`, `/crons`, `/mcp`, `/session`, `/context`, `/clear`, `/route`, `/bindings`, `/confirm`, and `/reject`.
+
+### Telegram
+
+Create a bot with [BotFather](https://t.me/BotFather), then add the channel configuration:
+
+```yaml
+channels:
+  enabled: true
+  telegram:
+    bot_token: "123456:replace-me"
+    allowed_user_ids:
+      - "123456789"
+```
+
+`allowed_user_ids` should be set for a private bot. If it is empty, messages from every Telegram user are accepted.
+
+Run the server:
+
+```bash
+uv run build-bot --workspace ./default_workspace server
+```
+
+Voice notes are optional and require `ffmpeg` on `PATH`:
+
+```yaml
+channels:
+  enabled: true
+  telegram:
+    bot_token: "123456:replace-me"
+    allowed_user_ids: ["123456789"]
+    voice:
+      enabled: true
+      provider: openai
+      model: gpt-4o-mini-transcribe
+      api_key: null       # reuse llm.api_key
+      max_file_size_mb: 20
+      max_duration_seconds: 300
+```
+
+Telegram locations are converted to coordinates before reaching the agent. The included researcher can pass those coordinates to Google Places instead of guessing where “nearby” means.
+
+### WebSocket
+
+The server exposes `ws://127.0.0.1:8005/ws` by default. Send a JSON object with a stable client identifier and message content:
+
+```json
+{
+  "source": "web-client-42",
+  "content": "What do I have planned today?"
+}
+```
+
+The connection receives typed event objects. An assistant reply has `"type": "OutboundEvent"`; use its `source`, `session_id`, and `content` fields to associate it with the client conversation.
+
+To listen outside the host, change the API bind address:
+
+```yaml
+api:
+  host: 0.0.0.0
+  port: 8005
+```
+
+The WebSocket endpoint does not currently implement authentication. Keep it on loopback or put it behind an authenticated reverse proxy; do not expose port `8005` directly to the public internet.
+
+### Scheduled jobs and proactive messages
+
+Scheduled jobs are Markdown definitions under `crons/`. The supported creation path is the `create_cron_job` tool, used by the included `cron-ops` skill. Jobs use standard five-field cron expressions with a minimum interval of five minutes; one-off reminders are removed after they run.
+
+Set a timezone so human times are interpreted consistently:
+
+```yaml
+timezone: Australia/Brisbane
+```
+
+For a cron agent to proactively deliver results, configure a platform destination. A Telegram source has this form:
+
+```yaml
+default_delivery_source: "platform-telegram:123456789:123456789"
+```
+
+The two values are the Telegram user ID and chat ID. Keep the Telegram channel enabled as shown above, and add `messaging.post_message` to the cron agent's `allowed_capabilities` in its `AGENT.md`.
+
+## Tools and integrations
+
+Tools are model-callable operations. A capability catalog describes each tool, its risk level, and its configuration requirements. The final tool set is the intersection of:
+
+1. tools registered by the application;
+2. the optional global `tools.enabled_capabilities` allowlist;
+3. the agent's `allowed_capabilities` list.
+
+This lets a coordinator delegate work without giving every specialist filesystem or shell access.
+
+| Area | What the assistant can use |
+| --- | --- |
+| **Core** | Read, write, and edit files; execute shell commands; create scheduled jobs |
+| **Skills** | Load task-specific instructions and run scripts declared by a skill |
+| **Agents** | Dispatch bounded work to another agent and collect its result |
+| **Web** | Brave web search and Crawl4AI page extraction |
+| **Memory** | Search and store facts, preferences, project context, decisions, and daily notes |
+| **Email** | Gmail search/read, draft replies, and confirmation-gated send/delete |
+| **Calendar** | Google Calendar search/availability and confirmation-gated create/update/delete |
+| **Tasks** | Todoist capture, lists, search, update, completion, and guarded delete/bulk operations |
+| **Places** | Google Places nearby search with ratings, review evidence, distance, and map links |
+| **MCP** | Remote tools discovered over Streamable HTTP and admitted through an exact allowlist |
+| **Messaging** | Send a cron or background result to the configured platform |
+
+Provider-backed tools only appear when their configuration is enabled. The full commented reference is in [`default_workspace/config.example.yaml`](default_workspace/config.example.yaml).
+
+### Capability policy
+
+Omitting the `tools` block keeps legacy permissive behavior, while per-agent `allowed_capabilities` still narrows access. To enforce a global allowlist and confirmation policy, list every capability your agents need:
+
+```yaml
+tools:
+  enabled_capabilities:
+    - agent.subagent_dispatch
+    - skills.invoke
+    - skills.run_script
+    - cron.create_job
+    - messaging.post_message
+    - web.search
+    - web.read
+    - places.search
+  risk_policy:
+    read: allow
+    draft: allow
+    confirm_required: require_confirmation
+    write: allow
+```
+
+When an operation needs approval, the tool records a pending action instead of mutating the external service. Approve or discard it in the same conversation:
+
+```text
+/confirm 0f4c...
+/reject 0f4c...
+```
+
+Telegram renders these as inline buttons as well.
+
+### Gmail and Google Calendar
+
+The repository includes an interactive OAuth helper. Place a Google Desktop OAuth client secret in the workspace and run:
+
+```bash
+scripts/setup-google-oauth.sh \
+  --workspace default_workspace \
+  --client-secret /path/to/client_secret.json
+```
+
+The helper writes token files under `default_workspace/.secrets/google/` and prints the YAML to add to `config.user.yaml`. Add `--with-mutating-email` or `--with-mutating-calendar` only when those operations are required. Review the printed `tools.enabled_capabilities` list: when a global allowlist is present, it must also contain the coordinator, skill, memory, web, task, or place capabilities used by your other agents.
+
+### Todoist
+
+Keep the token outside YAML and name its environment variable in the config:
+
+```yaml
+external_tools:
+  tasks:
+    enabled: true
+    provider: todoist
+    api_token_env: TODOIST_API_TOKEN
+```
+
+Then export it before starting the process:
+
+```bash
+export TODOIST_API_TOKEN="..."
+uv run build-bot --workspace ./default_workspace server
+```
+
+### Web and places
+
+```yaml
+websearch:
+  provider: brave
+  api_key: "..."
+
+webread:
+  provider: crawl4ai
+
+places:
+  provider: google_places
+  api_key: "..."
+```
+
+Crawl4AI may require browser dependencies in addition to the Python package. Google Places requests that include rating and review evidence may use billable Places API SKUs; configure quotas and billing limits in Google Cloud.
+
+### Remote tools over MCP
+
+build-bot can act as an MCP (Model Context Protocol) client. It connects to remote servers, discovers their tools, and exposes approved operations through the same capability registry and per-agent policy as built-in tools. If the `mcp` block is absent, no MCP connections are opened.
+
+Add servers under `mcp.servers`:
 
 ```yaml
 mcp:
   servers:
     movies_db:
       enabled: true
-      transport: streamable_http     # the only transport supported today
-      url_env: MOVIES_DB_URL         # or `url:` — exactly one of the two
-      token_env: MOVIES_DB_TOKEN     # env var NAME; never the token itself
-      health_path: /health           # probed before every MCP initialization
-      required: false                # optional: an outage degrades only this server
+      transport: streamable_http
+      url_env: MOVIES_DB_URL
+      token_env: MOVIES_DB_TOKEN
+      health_path: /health
+      required: false
       max_result_chars: 20000
-      allowed_tools:                 # the entire allowlist, matched exactly
+      allowed_tools:
         - movies_search_library
+        - movies_recommend
+      denied_tools:
+        - movies_delete_viewing
 ```
 
-Adding a second server needs no new top-level configuration — just another key
-under `servers`.
+Only Streamable HTTP is currently supported. Give exactly one of `url` or `url_env`; keep bearer tokens outside YAML by naming their environment variable with `token_env`.
 
-### Authentication
+Discovery is fail-closed:
 
-Tokens are never written to configuration. `token_env` names an environment
-variable, read only at connect time, and attached as
-`Authorization: Bearer <token>` to **every** HTTP request the session makes —
-the initialization POST, tool listing, tool calls, the resumption/notification
-stream, and the terminating DELETE. A token value never appears in logs,
-exceptions, `/mcp` output, or anything the model can see. Redirects are refused
-so the header can never be replayed to an unconfigured host.
+- only exact names from `allowed_tools` become available;
+- unlisted tools, newly advertised tools, and unsupported schemas remain quarantined;
+- `denied_tools` provides an additional explicit blocklist;
+- server descriptions and instructions are treated as untrusted data and cannot grant access or bypass confirmation;
+- redirects are refused so authorization headers cannot be replayed to an unconfigured host.
 
-### The allowlist and tool quarantine
+Each admitted tool receives a capability ID such as `mcp.movies_db.movies_recommend`. That ID must also be present in the target agent's `allowed_capabilities` and, when configured, the global `tools.enabled_capabilities` list. In the included workspace, only `movie-assistant` holds the movie capabilities; Pickle delegates movie requests to it.
 
-Discovery is **fail-closed**. Only the exact names in `allowed_tools` become
-capabilities:
+Inspect connections without exposing URLs, credentials, arguments, or results:
 
-- a tool the server advertises but you did not list stays quarantined;
-- a tool the server *adds later* stays quarantined until an operator lists it;
-- `denied_tools` is a redundant guard for names that must never be exposed;
-- a tool whose input schema cannot be represented is quarantined rather than
-  published with a guessed schema.
-
-Server-supplied descriptions, annotations, and instructions are untrusted hints.
-They are kept for diagnostics but can never grant access, lower a risk level,
-enable a retry, or bypass a confirmation gate. A server cannot enable itself.
-
-Server `instructions` stay out of prompts unless you set
-`use_server_instructions: true`, and even then they are shown only to an agent
-that already holds a capability from that server, clearly delimited as untrusted
-guidance, and size-capped.
-
-### Naming
-
-- capability id: `mcp.<server_id>.<remote_tool_name>`
-- LLM tool name: `mcp_<server_id>_<remote_tool_name>`, sanitized and truncated to
-  provider limits
-
-Names are deterministic and collision-safe: if sanitizing or truncating would
-make two tools collide, a short deterministic hash is appended. Two servers
-exposing the same remote tool name stay distinct, and a duplicate visible name is
-an error rather than a silent overwrite.
-
-### Per-agent access
-
-MCP capabilities are filtered per agent through the existing
-`allowed_capabilities` list in `AGENT.md`. In the default workspace only
-`movie-assistant` holds movie capabilities; Pickle routes to it and holds none
-itself.
-
-A session gets a stable tool schema for its lifetime, but every invocation
-re-checks that the server and tool are still globally enabled — disabling a
-server takes effect immediately, mid-session.
-
-### Diagnostics
-
-```
-/mcp              # all servers: state, tool counts, last error summary
-/mcp movies_db    # one server: version, last discovery, enabled/quarantined tools
+```text
+/mcp
+/mcp movies_db
 ```
 
-Output never contains credentials, URLs, tool arguments, or raw results.
+An unavailable optional server degrades independently; `required: true` instead makes it a startup dependency. Connections recover with bounded backoff, while ambiguous failed tool calls are not automatically retried because a remote mutation may already have happened. Server additions, removals, disabling, and endpoint changes are reconciled while the server is running.
 
-### Failure behavior
+Not yet supported: stdio and OAuth transports, MCP resources, prompts, sampling, and elicitation. See the commented MCP profile in [`default_workspace/config.example.yaml`](default_workspace/config.example.yaml) for timeouts, concurrency, result limits, and per-tool effect policies.
 
-- An optional server that is unreachable degrades on its own; the rest of the bot
-  keeps working. A server marked `required: true` fails startup instead.
-- Reconnection uses bounded exponential backoff with jitter and repeats the
-  `/health` probe before re-initializing.
-- A call that fails ambiguously — a timeout in particular — is **never** retried
-  automatically, because the server may already have applied it.
-- Configuration changes are reconciled live: added, removed, disabled, and
-  re-pointed servers are applied without a restart, and a removed or disabled
-  server denies new calls before its connection is closed.
+## Customize the assistant
 
+### Workspace layout
 
-### Not supported yet
+```text
+my-workspace/
+├── config.user.yaml          # secrets and user-owned configuration
+├── config.runtime.yaml       # generated routing/session state
+├── agents/
+│   └── <agent-id>/
+│       ├── AGENT.md          # model, capabilities, and instructions
+│       └── SOUL.md           # optional personality layer
+├── skills/
+│   └── <skill-id>/
+│       ├── SKILL.md          # instructions and resource manifest
+│       ├── scripts/          # optional executable helpers
+│       └── references/       # optional on-demand context
+├── crons/<job-id>/CRON.md    # scheduled prompts
+├── memories/                 # durable Markdown memory
+├── .history/                 # persisted conversations
+├── .event/                   # pending events and confirmations
+└── .logs/                    # application and optional LLM traces
+```
 
-stdio and OAuth transports; MCP resources, prompts, sampling, and elicitation;
-and a generic confirmed-executor flow for MCP tools configured with
-`host_before_call`. The `movies_db` profile therefore permits only explicit
-non-destructive writes and keeps deletion unavailable.
+Relative paths in the configuration are resolved from the workspace root. Keep `config.user.yaml`, `.secrets/`, `.history/`, `.event/`, and `.logs/` out of version control.
 
-## Stack
+### Define an agent
 
-- **LiteLLM** — talks to any LLM (OpenAI, Anthropic, etc.)
-- **Typer + Rich** — CLI
-- **FastAPI + uvicorn** — WebSocket API
-- **python-telegram-bot** — Telegram channel
-- **Pydantic** — config and data validation
-- **watchdog** — config hot-reload
-- **MCP Python SDK** — Streamable HTTP client for remote tool servers
+Each agent is a folder containing `AGENT.md`. YAML frontmatter controls runtime behavior; the Markdown body becomes its operating instructions.
+
+```markdown
+---
+name: Researcher
+description: Searches the web and compares sources.
+allow_skills: false
+max_concurrency: 2
+allowed_capabilities:
+  - web.search
+  - web.read
+llm:
+  temperature: 0.3
+---
+
+You are a research specialist. Compare independent sources, cite claims,
+and distinguish strong evidence from uncertain conclusions.
+```
+
+Set `default_agent` in `config.user.yaml`, or route a source pattern from a conversation:
+
+```text
+/route platform-telegram:123456789:.* pickle
+```
+
+### Define a skill
+
+A skill adds reusable domain instructions without adding another always-running service:
+
+```markdown
+---
+name: release-checklist
+description: Prepare and verify a production release.
+when_to_use:
+  - The user asks to prepare or verify a release
+required_tools:
+  - bash
+---
+
+Follow the project's release checklist, run the declared checks, and report
+blocking failures separately from warnings.
+```
+
+Validate every skill in a workspace before deployment:
+
+```bash
+uv run build-bot --workspace ./default_workspace validate-skills
+```
+
+The included `weather-information` skill is a concrete example of a skill with its own constrained script, and `skill-creator` shows how to package new skills.
+
+## Run with Docker
+
+The image runs the long-lived server as an unprivileged user with uid `10001`. Application code and dependencies are built into the image; the workspace is mounted at `/workspace`, keeping configuration, credentials, agents, memory, and history on the host.
+
+### Standalone image
+
+Prepare `default_workspace/config.user.yaml` as described in the quick start. For access to the published WebSocket port, set:
+
+```yaml
+api:
+  host: 0.0.0.0
+  port: 8005
+```
+
+Build and run the container:
+
+```bash
+docker build -t build-bot:latest .
+
+docker run --name build-bot --restart unless-stopped \
+  -v "$PWD/default_workspace:/workspace" \
+  -p 127.0.0.1:8005:8005 \
+  build-bot:latest
+```
+
+On Linux, ensure the mounted workspace is readable and writable by uid `10001`. The port is bound to host loopback intentionally; use an authenticated reverse proxy if remote WebSocket access is required. Telegram does not require an inbound port.
+
+### Docker Compose with `movies_db`
+
+The checked-in [`compose.yaml`](compose.yaml) is the production contract for the included movie assistant. It connects build-bot to a separately deployed `movies_db` MCP service over a private external Docker network. Compose intentionally requires a matching bearer token and will fail before startup when it is absent.
+
+Before the first deployment:
+
+1. Configure `default_workspace/config.user.yaml`, including `api.host: 0.0.0.0` when WebSocket access is needed.
+2. Enable the `mcp.servers.movies_db` example from `default_workspace/config.example.yaml`.
+3. Make `default_workspace` writable by uid `10001` on Linux.
+4. Ensure the separate `movies_db` service is reachable as `movies-db:8765` on the `mcp_internal` network and exposes `/health`.
+
+Create the shared network once, provide the token, and start build-bot:
+
+```bash
+docker network inspect mcp_internal >/dev/null 2>&1 || \
+  docker network create mcp_internal
+
+export MOVIES_DB_TOKEN="replace-with-the-movies-db-token"
+docker compose up -d --build
+```
+
+`compose.yaml` supplies `MOVIES_DB_URL=http://movies-db:8765/mcp` inside the container. It publishes only build-bot's WebSocket port on `127.0.0.1`; the MCP port stays private and must not be published by the `movies_db` deployment.
+
+Useful operational commands:
+
+```bash
+MOVIES_DB_TOKEN=dummy docker compose config
+docker compose logs -f build-bot
+docker compose restart build-bot
+docker compose down
+```
+
+`docker compose down` removes the build-bot container and its default network, but not the bind-mounted workspace or the externally managed `mcp_internal` network. For network layout, health checks, and deployment verification, see [`docs/deployment.md`](docs/deployment.md).
+
+The image is reproducible from the tracked `uv.lock` and does not contain workspace data or secrets. Crawl4AI browser binaries are not installed in the base image; use a derived image if the `webread` tool is required inside Docker.
+
+## Install as a systemd service
+
+The following setup keeps application code in `/opt/build-bot` and mutable workspace data in `/var/lib/build-bot/workspace`. Commands assume `git`, Python 3.11+, and `uv` are already installed on the server.
+
+Create a dedicated user and install the project:
+
+```bash
+sudo useradd --system --create-home --home-dir /var/lib/build-bot build-bot
+sudo git clone https://github.com/TiniTun/build_bot.git /opt/build-bot
+sudo chown -R build-bot:build-bot /opt/build-bot
+sudo -u build-bot uv sync --project /opt/build-bot
+
+sudo install -d -o build-bot -g build-bot /var/lib/build-bot/workspace
+sudo cp -a /opt/build-bot/default_workspace/. /var/lib/build-bot/workspace/
+sudo cp /var/lib/build-bot/workspace/config.example.yaml \
+  /var/lib/build-bot/workspace/config.user.yaml
+sudo chown -R build-bot:build-bot /var/lib/build-bot/workspace
+sudo chmod 600 /var/lib/build-bot/workspace/config.user.yaml
+```
+
+Edit `/var/lib/build-bot/workspace/config.user.yaml`, then create `/etc/systemd/system/build-bot.service`:
+
+```ini
+[Unit]
+Description=build-bot personal AI assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=build-bot
+Group=build-bot
+WorkingDirectory=/opt/build-bot
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-/etc/build-bot.env
+ExecStart=/opt/build-bot/.venv/bin/build-bot --workspace /var/lib/build-bot/workspace server
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/build-bot
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Optional provider settings such as `TODOIST_API_TOKEN`, `MOVIES_DB_URL`, and `MOVIES_DB_TOKEN` can be placed in `/etc/build-bot.env` with permissions `0600`. Do not put shell `export` statements in that file; use `NAME=value` lines.
+
+Enable and inspect the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now build-bot
+sudo systemctl status build-bot
+sudo journalctl -u build-bot -f
+```
+
+Update an installation:
+
+```bash
+sudo -u build-bot git -C /opt/build-bot pull --ff-only
+sudo -u build-bot uv sync --project /opt/build-bot
+sudo systemctl restart build-bot
+```
+
+The workspace is deliberately outside the Git checkout, so updates do not overwrite agents, skills, memory, credentials, or conversation history.
+
+## Operations and troubleshooting
+
+```bash
+# Check the CLI and configuration loading
+uv run build-bot --workspace ./default_workspace --help
+
+# Validate skill manifests and referenced files
+uv run build-bot --workspace ./default_workspace validate-skills
+
+# Run the long-lived worker stack in the foreground
+uv run build-bot --workspace ./default_workspace server
+```
+
+- If the process exits during startup, check that `config.user.yaml` exists and all configured paths and YAML values are valid.
+- If a provider tool is missing, verify its provider block, global capability allowlist, and the target agent's `allowed_capabilities`.
+- If a scheduled job runs but sends nothing, configure `default_delivery_source` and keep the corresponding channel enabled.
+- If Telegram ignores a user, compare their numeric ID with `allowed_user_ids`.
+- If WebSocket works locally but not remotely, check `api.host`, the firewall, and the authenticated reverse proxy.
+
+## Architecture
+
+- **`core/`** — agents, sessions, history, memory, routing, events, commands, and compaction
+- **`server/`** — worker lifecycle, scheduling, delivery, channel bridges, and WebSocket API
+- **`channel/`** — platform adapters such as Telegram
+- **`provider/`** — LLM, external-service, and MCP adapters
+- **`tools/`** — model-callable operations, capability metadata, and confirmation gates
+- **`cli/`** — interactive chat and long-running server commands
+- **`default_workspace/`** — a usable multi-agent assistant configuration
+- **`Dockerfile` / `compose.yaml`** — reproducible container build and production deployment contract
+
+The domain flow is intentionally transport-independent: channels publish typed events, routing selects an agent and session, the agent runs its model/tool loop, and delivery returns the result to the right platform.
