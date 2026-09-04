@@ -149,6 +149,24 @@ class DayPatternSet(BaseModel):
         return cls.model_validate(yaml.safe_load(path.read_text()) or {})
 
 
+class Candidate(BaseModel):
+    """One thing that may be scheduled, normalized across patterns and tasks."""
+
+    model_config = ConfigDict(extra="forbid")
+    slot_key: str
+    title: str
+    duration_minutes: int
+    priority: Priority
+    energy: Energy
+    category: Category
+    flexibility: Flexibility
+    fixed_time: str | None = None
+    window: TimeWindow | None = None
+    # Stable tie-break: file order for patterns, sort position for tasks.
+    order: int
+    duration_assumed: bool = False
+
+
 ReadinessVerdict = Literal["green", "yellow", "red", "unknown"]
 ReadinessSource = Literal[
     "whoop", "no_cycle_yet", "unavailable", "unauthorised", "date_mismatch"

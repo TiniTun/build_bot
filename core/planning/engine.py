@@ -6,11 +6,23 @@ or an LLM.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Mapping
 from zoneinfo import ZoneInfo
 
-from core.planning.models import Interval, ReadinessSignal, ReadinessSource, TimeWindow
+from core.planning.models import (
+    ENERGY_RANK,
+    PRIORITY_RANK,
+    Candidate,
+    DayPattern,
+    Interval,
+    PatternLimits,
+    Priority,
+    ReadinessSignal,
+    ReadinessSource,
+    TimeWindow,
+)
 
 if TYPE_CHECKING:
     from provider.mcp.models import McpCallResult
@@ -169,3 +181,114 @@ def free_intervals(
     if cursor < window_end:
         intervals.append(Interval(start=cursor, end=window_end))
     return intervals
+
+
+@dataclass(frozen=True)
+class _VerdictPolicy:
+    """How much a verdict allows. `unknown` deliberately reuses yellow's."""
+
+    scheduled_ratio: float
+    min_priority: Priority
+    max_energy: str
+    recovery_or_essential_only: bool = False
+
+
+_POLICIES: dict[str, _VerdictPolicy] = {
+    "green": _VerdictPolicy(1.0, "low", "high"),
+    "yellow": _VerdictPolicy(0.6, "medium", "medium"),
+    # On red the priority floor is deliberately NOT binding: the
+    # recovery-or-essential rule is the whole gate. Applying both would drop a
+    # medium-priority recovery walk, which is what a red day most wants to keep.
+    "red": _VerdictPolicy(0.25, "low", "low", recovery_or_essential_only=True),
+    "unknown": _VerdictPolicy(0.6, "medium", "medium"),
+}
+
+
+def budget_minutes(signal_verdict: str, limits: PatternLimits) -> int:
+    """Minutes this verdict permits to be scheduled, before free time is known."""
+    policy = _POLICIES[signal_verdict]
+    return int(limits.max_scheduled_minutes * policy.scheduled_ratio)
+
+
+def task_priority(task: Any, *, overdue: bool) -> Priority:
+    """Map a Todoist priority (4 = p1 = urgent) onto the pattern scale.
+
+    An overdue p1 is promoted to `essential` so it remains schedulable on a red
+    day — requirement 5's "only essential work and recovery".
+    """
+    if task.priority >= 4:
+        return "essential" if overdue else "high"
+    if task.priority == 3:
+        return "medium"
+    return "low"
+
+
+def _admits(policy: _VerdictPolicy, priority: str, energy: str, category: str) -> bool:
+    if policy.recovery_or_essential_only:
+        return category == "recovery" or priority == "essential"
+    if PRIORITY_RANK[priority] > PRIORITY_RANK[policy.min_priority]:
+        return False
+    return ENERGY_RANK[energy] <= ENERGY_RANK[policy.max_energy]
+
+
+def select_candidates(
+    patterns: list[DayPattern],
+    tasks: list[Any],
+    signal: ReadinessSignal,
+    limits: PatternLimits,
+    *,
+    weekday: str,
+    overdue_ids: set[str],
+) -> list[Candidate]:
+    """Everything the verdict permits, in deterministic placement order.
+
+    Ordering is total, so the same inputs always yield the same plan: pattern
+    activities in file order first, then tasks — overdue before due-today,
+    higher Todoist priority first, then task id.
+    """
+    policy = _POLICIES[signal.verdict]
+    candidates: list[Candidate] = []
+
+    for index, activity in enumerate(patterns):
+        if not _admits(policy, activity.priority, activity.energy, activity.category):
+            continue
+        candidates.append(
+            Candidate(
+                slot_key=f"pattern:{weekday}:{activity.slug()}",
+                title=activity.name,
+                duration_minutes=activity.duration_minutes,
+                priority=activity.priority,
+                energy=activity.energy,
+                category=activity.category,
+                flexibility=activity.flexibility,
+                fixed_time=activity.fixed_time,
+                window=activity.window,
+                order=index,
+            )
+        )
+
+    # Overdue first, then most-urgent first, then id — a total order, so two
+    # equally urgent tasks never swap places between runs.
+    ordered = sorted(
+        tasks,
+        key=lambda t: (0 if t.id in overdue_ids else 1, -t.priority, t.id),
+    )
+    for index, task in enumerate(ordered):
+        priority = task_priority(task, overdue=task.id in overdue_ids)
+        if not _admits(policy, priority, "medium", "work"):
+            continue
+        candidates.append(
+            Candidate(
+                slot_key=f"task:{task.id}",
+                title=task.content,
+                duration_minutes=task.estimated_minutes or 30,
+                priority=priority,
+                energy="medium",
+                category="work",
+                flexibility="flexible",
+                order=len(patterns) + index,
+                duration_assumed=task.duration_assumed,
+            )
+        )
+
+    return candidates
