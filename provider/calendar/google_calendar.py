@@ -48,6 +48,22 @@ def _map_http_error(exc: Exception) -> Exception:
     return exc
 
 
+def _day_bounds(day: str, timezone: str) -> tuple[str, str]:
+    """RFC3339 bounds covering one local calendar day, [start, next-day-start).
+
+    Built from the zone's own offset for that date so a DST boundary cannot
+    silently widen or narrow the window.
+    """
+    from datetime import date, datetime, time, timedelta
+    from zoneinfo import ZoneInfo
+
+    zone = ZoneInfo(timezone)
+    parsed = date.fromisoformat(day)
+    start = datetime.combine(parsed, time.min, tzinfo=zone)
+    end = datetime.combine(parsed + timedelta(days=1), time.min, tzinfo=zone)
+    return start.isoformat(), end.isoformat()
+
+
 def _has_utc_offset(value: str) -> bool:
     """Return True when an ISO datetime string carries a UTC offset.
 
@@ -172,6 +188,34 @@ class GoogleCalendarProvider:
             raise _map_http_error(e) from e
         return [_event_from_item(item) for item in response.get("items", [])]
 
+    async def list_day(
+        self, day: str, timezone: str, calendar_id: str | None = None
+    ) -> list[CalendarEvent]:
+        """Every event overlapping one local day, ordered by start.
+
+        Deliberately sends no ``q``: the planner needs the complete day, and a
+        text search would silently omit events whose titles do not match.
+        ``singleEvents`` expands recurrences so a weekly meeting appears as the
+        instance that actually occupies today.
+        """
+        time_min, time_max = _day_bounds(day, timezone)
+        try:
+            response = await asyncio.to_thread(
+                self._svc()
+                .events()
+                .list(
+                    calendarId=calendar_id or self._calendar_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    singleEvents=True,
+                    orderBy="startTime",
+                )
+                .execute
+            )
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            raise _map_http_error(e) from e
+        return [_event_from_item(item) for item in response.get("items", [])]
+
     async def availability(
         self,
         attendees: list[str],
@@ -194,14 +238,17 @@ class GoogleCalendarProvider:
             busy.extend(cal.get("busy", []))
         return AvailabilityResult(busy=busy, available=not busy)
 
-    async def create_event(self, request: CreateEventRequest) -> CalendarEvent:
+    async def create_event(
+        self, request: CreateEventRequest, calendar_id: str | None = None
+    ) -> CalendarEvent:
         try:
             response = await asyncio.to_thread(
                 self._svc()
                 .events()
                 .insert(
-                    calendarId=self._calendar_id,
+                    calendarId=calendar_id or self._calendar_id,
                     body=_event_body(request, self._timezone()),
+                    sendUpdates="none",
                 )
                 .execute
             )
@@ -210,16 +257,20 @@ class GoogleCalendarProvider:
         return _event_from_item(response)
 
     async def update_event(
-        self, event_id: str, request: CreateEventRequest
+        self,
+        event_id: str,
+        request: CreateEventRequest,
+        calendar_id: str | None = None,
     ) -> CalendarEvent:
         try:
             response = await asyncio.to_thread(
                 self._svc()
                 .events()
                 .patch(
-                    calendarId=self._calendar_id,
+                    calendarId=calendar_id or self._calendar_id,
                     eventId=event_id,
                     body=_event_body(request, self._timezone()),
+                    sendUpdates="none",
                 )
                 .execute
             )
@@ -227,12 +278,18 @@ class GoogleCalendarProvider:
             raise _map_http_error(e) from e
         return _event_from_item(response)
 
-    async def delete_event(self, event_id: str) -> None:
+    async def delete_event(
+        self, event_id: str, calendar_id: str | None = None
+    ) -> None:
         try:
             await asyncio.to_thread(
                 self._svc()
                 .events()
-                .delete(calendarId=self._calendar_id, eventId=event_id)
+                .delete(
+                    calendarId=calendar_id or self._calendar_id,
+                    eventId=event_id,
+                    sendUpdates="none",
+                )
                 .execute
             )
         except Exception as e:  # noqa: BLE001 - mapped to stable error codes

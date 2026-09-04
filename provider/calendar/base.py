@@ -76,13 +76,24 @@ class CalendarProvider(Protocol):
         time_max: str,
     ) -> AvailabilityResult: ...
 
-    async def create_event(self, request: CreateEventRequest) -> CalendarEvent: ...
+    async def list_day(
+        self, day: str, timezone: str, calendar_id: str | None = None
+    ) -> list[CalendarEvent]: ...
 
-    async def update_event(
-        self, event_id: str, request: CreateEventRequest
+    async def create_event(
+        self, request: CreateEventRequest, calendar_id: str | None = None
     ) -> CalendarEvent: ...
 
-    async def delete_event(self, event_id: str) -> None: ...
+    async def update_event(
+        self,
+        event_id: str,
+        request: CreateEventRequest,
+        calendar_id: str | None = None,
+    ) -> CalendarEvent: ...
+
+    async def delete_event(
+        self, event_id: str, calendar_id: str | None = None
+    ) -> None: ...
 
 
 class NullCalendarProvider:
@@ -98,15 +109,27 @@ class NullCalendarProvider:
     ) -> AvailabilityResult:
         raise AuthMissingError("calendar provider is not configured")
 
-    async def create_event(self, request: CreateEventRequest) -> CalendarEvent:
+    async def list_day(
+        self, day: str, timezone: str, calendar_id: str | None = None
+    ) -> list[CalendarEvent]:
         raise AuthMissingError("calendar provider is not configured")
 
-    async def update_event(
-        self, event_id: str, request: CreateEventRequest
+    async def create_event(
+        self, request: CreateEventRequest, calendar_id: str | None = None
     ) -> CalendarEvent:
         raise AuthMissingError("calendar provider is not configured")
 
-    async def delete_event(self, event_id: str) -> None:
+    async def update_event(
+        self,
+        event_id: str,
+        request: CreateEventRequest,
+        calendar_id: str | None = None,
+    ) -> CalendarEvent:
+        raise AuthMissingError("calendar provider is not configured")
+
+    async def delete_event(
+        self, event_id: str, calendar_id: str | None = None
+    ) -> None:
         raise AuthMissingError("calendar provider is not configured")
 
 

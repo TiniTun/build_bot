@@ -4,11 +4,17 @@ Hermetic: a fake synchronous service is injected, following the pattern in
 tests/test_google_calendar.py. No network, no Google auth.
 """
 
+import asyncio
 import unittest
 from types import SimpleNamespace
 
-from provider.calendar.base import CreateEventRequest
-from provider.calendar.google_calendar import _event_body, _event_from_item
+from provider.calendar.base import CreateEventRequest, NullCalendarProvider
+from provider.calendar.google_calendar import (
+    GoogleCalendarProvider,
+    _event_body,
+    _event_from_item,
+)
+from provider.external_errors import AuthMissingError
 
 
 class TestEventMapping(unittest.TestCase):
@@ -140,3 +146,85 @@ class TestEventMapping(unittest.TestCase):
             "Australia/Brisbane",
         )
         self.assertNotIn("extendedProperties", body)
+
+
+class _RecordingEvents:
+    """Records list/insert kwargs so the test can assert on the request."""
+
+    def __init__(self, items):
+        self.items = items
+        self.list_kwargs = None
+        self.insert_kwargs = None
+
+    def list(self, **kwargs):
+        self.list_kwargs = kwargs
+        return SimpleNamespace(execute=lambda: {"items": self.items})
+
+    def insert(self, **kwargs):
+        self.insert_kwargs = kwargs
+        return SimpleNamespace(execute=lambda: {
+            "id": "new", "summary": kwargs["body"]["summary"],
+            "start": kwargs["body"]["start"], "end": kwargs["body"]["end"],
+        })
+
+
+class _RecordingService:
+    def __init__(self, items):
+        self._events = _RecordingEvents(items)
+
+    def events(self):
+        return self._events
+
+
+def _provider(items):
+    service = _RecordingService(items)
+    cfg = SimpleNamespace(calendar_id="primary")
+    config = SimpleNamespace(timezone="Australia/Brisbane")
+    return GoogleCalendarProvider(config, cfg, service=service), service
+
+
+class TestListDay(unittest.TestCase):
+    def test_list_day_sends_no_query_parameter(self):
+        provider, service = _provider([])
+        asyncio.run(provider.list_day("2026-09-04", "Australia/Brisbane"))
+        kwargs = service.events().list_kwargs
+        self.assertNotIn("q", kwargs)
+        self.assertTrue(kwargs["singleEvents"])
+        self.assertEqual(kwargs["orderBy"], "startTime")
+
+    def test_list_day_window_covers_the_local_day(self):
+        provider, service = _provider([])
+        asyncio.run(provider.list_day("2026-09-04", "Australia/Brisbane"))
+        kwargs = service.events().list_kwargs
+        self.assertEqual(kwargs["timeMin"], "2026-09-04T00:00:00+10:00")
+        self.assertEqual(kwargs["timeMax"], "2026-09-05T00:00:00+10:00")
+
+    def test_list_day_targets_the_requested_calendar(self):
+        provider, service = _provider([])
+        asyncio.run(provider.list_day("2026-09-04", "Australia/Brisbane",
+                                      calendar_id="plan@group.calendar.google.com"))
+        self.assertEqual(
+            service.events().list_kwargs["calendarId"],
+            "plan@group.calendar.google.com",
+        )
+
+    def test_create_event_defaults_to_configured_calendar(self):
+        provider, service = _provider([])
+        asyncio.run(provider.create_event(
+            CreateEventRequest(title="x", start="2026-09-04T10:00:00+10:00",
+                               end="2026-09-04T10:30:00+10:00")))
+        self.assertEqual(service.events().insert_kwargs["calendarId"], "primary")
+
+    def test_create_event_never_sends_invitations(self):
+        provider, service = _provider([])
+        asyncio.run(provider.create_event(
+            CreateEventRequest(title="x", start="2026-09-04T10:00:00+10:00",
+                               end="2026-09-04T10:30:00+10:00"),
+            calendar_id="plan@group.calendar.google.com"))
+        self.assertEqual(service.events().insert_kwargs["sendUpdates"], "none")
+
+
+class TestNullProvider(unittest.TestCase):
+    def test_list_day_reports_auth_missing_not_attribute_error(self):
+        with self.assertRaises(AuthMissingError):
+            asyncio.run(NullCalendarProvider().list_day("2026-09-04", "UTC"))
