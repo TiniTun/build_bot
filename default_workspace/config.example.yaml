@@ -158,3 +158,15 @@ default_agent: pickle
 # memory:
 #   auto_retrieve: false   # reserved: prompt-level retrieval is handled by Pickle's prompt today
 #   auto_extract: false    # when true, AgentWorker fire-and-forgets durable-fact extraction to Cookie after user-facing turns
+
+# Daily planner. Omit this block entirely to keep the bot's behavior exactly as
+# it was before the planner existed. `mode` defaults to `shadow`, which reports
+# a plan and writes nothing.
+# planning:
+#   enabled: true
+#   mode: shadow                    # shadow | review | auto
+#   patterns_path: planning/day_patterns.yaml
+#   # A DEDICATED calendar. Never `primary` — rejected at load time.
+#   planning_calendar_id: your-daily-plan-calendar-id@group.calendar.google.com
+#   max_events_per_day: 12
+#   plan_deadline: "08:30"          # must equal the planner cron's last tick

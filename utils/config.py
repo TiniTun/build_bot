@@ -195,6 +195,48 @@ class MemoryConfig(BaseModel):
     auto_extract: bool = False
 
 
+class PlanningConfig(BaseModel):
+    """Daily-planner configuration. An absent block leaves the feature inert.
+
+    ``patterns_path`` is resolved here rather than in ``Config.resolve_paths``,
+    which only walks top-level path fields; a nested one would stay relative and
+    break whenever the process's cwd is not the workspace.
+    """
+
+    enabled: bool = False
+    mode: Literal["shadow", "review", "auto"] = "shadow"
+    patterns_path: Path = Path("planning/day_patterns.yaml")
+    planning_calendar_id: str | None = None
+    max_events_per_day: int = Field(default=12, gt=0, le=50)
+    # Must equal the LAST tick of the cron schedule that runs the planner: the
+    # tick at or after this time stops waiting for WHOOP and plans regardless.
+    plan_deadline: str = "08:30"
+
+    @field_validator("planning_calendar_id")
+    @classmethod
+    def must_not_be_primary(cls, v: str | None) -> str | None:
+        # A typo here would point every planner write at the user's own
+        # calendar, so it is rejected at load time rather than at write time.
+        if v is not None and v.strip().lower() == "primary":
+            raise ValueError(
+                "planning_calendar_id must be a dedicated calendar, never 'primary'"
+            )
+        return v
+
+    @field_validator("plan_deadline")
+    @classmethod
+    def must_be_hhmm(cls, v: str) -> str:
+        from datetime import datetime
+
+        datetime.strptime(v, "%H:%M")
+        return v
+
+    def resolve(self, workspace: Path) -> None:
+        """Make ``patterns_path`` absolute against the workspace root."""
+        if not self.patterns_path.is_absolute():
+            self.patterns_path = workspace / self.patterns_path
+
+
 class Config(BaseModel):
     """Main configuration"""
 
@@ -218,6 +260,7 @@ class Config(BaseModel):
     mcp: McpConfig | None = None
     external_tools: ExternalToolsConfig = Field(default_factory=ExternalToolsConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    planning: PlanningConfig | None = None
     sources: dict[str, SourceSessionConfig] = Field(default_factory=dict)
     routing: dict = Field(default_factory=lambda: {"bindings": []})
     default_delivery_source: str | None = None
@@ -246,8 +289,7 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
         """Resolve relative paths to absolute using workspace."""
-        if not self.workspace.is_absolute():
-            self.workspace = self.workspace.resolve()     
+        self.workspace = self.workspace.resolve()     
 
         for field_name in (
             "agents_path",
@@ -262,6 +304,10 @@ class Config(BaseModel):
             path = getattr(self, field_name)
             if not path.is_absolute():
                 setattr(self, field_name, self.workspace / path)
+
+        if self.planning is not None:
+            self.planning.resolve(self.workspace)
+
         return self
     
     @classmethod
