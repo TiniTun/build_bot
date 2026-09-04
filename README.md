@@ -379,6 +379,26 @@ An unavailable optional server degrades independently; `required: true` instead 
 
 Not yet supported: stdio and OAuth transports, MCP resources, prompts, sampling, and elicitation. See the commented MCP profile in [`default_workspace/config.example.yaml`](default_workspace/config.example.yaml) for timeouts, concurrency, result limits, and per-tool effect policies.
 
+## Daily planner
+
+The daily planner turns calendar, tasks, a weekly routine, and WHOOP readiness into one deterministic plan for the day. A restricted `daily-planner` agent runs from cron each morning, calls `planning_build_day_plan` then `planning_sync_daily_plan`, and reports a short summary. The engine decides what gets scheduled; the agent narrates it and never invents a readiness verdict. The feature is entirely inert until `planning:` is configured — see the commented block in [`default_workspace/config.example.yaml`](default_workspace/config.example.yaml).
+
+`planning.mode` has three values:
+
+- `shadow` (default) — builds and reports the plan but writes nothing to the calendar.
+- `review` — writes the plan but leaves it for confirmation before it takes effect.
+- `auto` — writes the plan outright.
+
+`planning.planning_calendar_id` must point at a calendar dedicated to the planner's own events. Setting it to `primary` is rejected at config load time — a typo there would otherwise point every planner write at the user's own calendar.
+
+The cron job lives at `default_workspace/crons/daily-plan/CRON.md`, but `default_workspace/crons/` is gitignored like the rest of the mutable workspace state, so this file is **not** version-controlled and is not on a fresh clone. Create it manually on any machine that runs the server; its frontmatter needs `name`, `description`, `agent: daily-planner`, and `schedule: "*/30 5-8 * * *"`.
+
+`planning.plan_deadline` must equal the **last tick** of that cron schedule (`08:30` for `*/30 5-8 * * *`) — the tick that stops waiting for WHOOP and plans regardless. Change the cron schedule and `plan_deadline` together: a deadline later than the last tick means the day is never planned, and one earlier means the deadline tick is not actually the last one.
+
+WHOOP readiness is read through a separate, host-only MCP server (`health_planner` in the commented MCP profile) with `expose_to_agents: false`. The host calls it on the model's behalf; the raw metrics never become an agent-visible capability or reach the model's context — only the classified `green`/`yellow`/`red`/`unknown` verdict does, via `planning_build_day_plan`.
+
+If your workspace sets `tools.enabled_capabilities`, that list is intersected with each agent's own `allowed_capabilities`, not overridden by it. Forgetting the planner's five ids there — `calendar.day_agenda`, `tasks.today`, `tasks.overdue`, `planning.build_day_plan`, `planning.sync_daily_plan` — leaves `daily-planner` with zero tools and no error; the cron session then narrates whatever the model makes of having nothing to call.
+
 ## Customize the assistant
 
 ### Workspace layout

@@ -98,7 +98,10 @@ default_agent: pickle
 #   # final per-agent tool set is the intersection of this list and the agent's
 #   # own allowed_capabilities (see agents/<id>/AGENT.md). Cookie needs the
 #   # memory.* ids here, or the memory manager ends up with no functional tools.
-#   enabled_capabilities: [memory.search, memory.store_fact, memory.store_preference, memory.store_project_context, memory.store_decision, memory.append_daily_note, email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event, tasks.quick_add, tasks.inbox, tasks.today, tasks.overdue, tasks.search, tasks.update, tasks.complete, tasks.delete, tasks.bulk_update, mcp.movies_db.movies_get_taste_profile, mcp.movies_db.movies_get_viewing, mcp.movies_db.movies_recommend, mcp.movies_db.movies_resolve_title, mcp.movies_db.movies_search_library, mcp.movies_db.movies_search_catalog, mcp.movies_db.movies_log_viewing, mcp.movies_db.movies_update_viewing, mcp.movies_db.movies_record_feedback]
+#   # If this list is set, EVERY capability an agent uses must appear here — the
+#   # per-agent list is an intersection, not an override. Omitting the planning
+#   # ids below gives daily-planner zero tools, silently, with no error.
+#   enabled_capabilities: [memory.search, memory.store_fact, memory.store_preference, memory.store_project_context, memory.store_decision, memory.append_daily_note, email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event, tasks.quick_add, tasks.inbox, tasks.today, tasks.overdue, tasks.search, tasks.update, tasks.complete, tasks.delete, tasks.bulk_update, calendar.day_agenda, planning.build_day_plan, planning.sync_daily_plan, mcp.movies_db.movies_get_taste_profile, mcp.movies_db.movies_get_viewing, mcp.movies_db.movies_recommend, mcp.movies_db.movies_resolve_title, mcp.movies_db.movies_search_library, mcp.movies_db.movies_search_catalog, mcp.movies_db.movies_log_viewing, mcp.movies_db.movies_update_viewing, mcp.movies_db.movies_record_feedback]
 #   risk_policy: {read: allow, draft: allow, confirm_required: require_confirmation, write: allow}
 
 # Remote MCP (Model Context Protocol) servers. Omit this block entirely to keep
@@ -153,6 +156,28 @@ default_agent: pickle
 #         movies_update_viewing: {effect: write, confirmation: none, retry: never}
 #         movies_record_feedback: {effect: write, confirmation: none, retry: never}
 #       use_server_instructions: false   # keep untrusted server guidance out of prompts
+
+# A second server entry for the same `mcp.servers` mapping above: the
+# host-only readiness source for the daily planner. Merge it under the same
+# `servers:` key as movies_db if you want both active. The host calls this
+# server on the model's behalf; nothing it returns becomes a capability.
+#     health_planner:
+#       enabled: true
+#       transport: streamable_http
+#       url: http://127.0.0.1:8767/mcp
+#       health_path: /health
+#       required: false              # an outage degrades to `unknown` readiness
+#       read_timeout_seconds: 540
+#       allowed_tools: [get_daily_readiness, whoop_status]
+#       # get_whoop_today returns the same signal unclassified — raw recovery,
+#       # sleep, HRV, resting heart rate, respiratory rate — so it is denied
+#       # explicitly rather than merely left off the allowlist.
+#       denied_tools: [get_whoop_today]
+#       # False keeps this tool callable by the host while registering no
+#       # agent-visible capability — what keeps raw WHOOP data structurally
+#       # out of the model's context, regardless of which agent is running.
+#       expose_to_agents: false
+#       use_server_instructions: false
 
 # Opt-in durable-memory workflows. Both default to false (no runtime behavior).
 # memory:
