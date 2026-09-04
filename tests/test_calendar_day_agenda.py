@@ -155,6 +155,8 @@ class _RecordingEvents:
         self.items = items
         self.list_kwargs = None
         self.insert_kwargs = None
+        self.patch_kwargs = None
+        self.delete_kwargs = None
 
     def list(self, **kwargs):
         self.list_kwargs = kwargs
@@ -166,6 +168,17 @@ class _RecordingEvents:
             "id": "new", "summary": kwargs["body"]["summary"],
             "start": kwargs["body"]["start"], "end": kwargs["body"]["end"],
         })
+
+    def patch(self, **kwargs):
+        self.patch_kwargs = kwargs
+        return SimpleNamespace(execute=lambda: {
+            "id": kwargs["eventId"], "summary": kwargs["body"]["summary"],
+            "start": kwargs["body"]["start"], "end": kwargs["body"]["end"],
+        })
+
+    def delete(self, **kwargs):
+        self.delete_kwargs = kwargs
+        return SimpleNamespace(execute=lambda: None)
 
 
 class _RecordingService:
@@ -222,6 +235,48 @@ class TestListDay(unittest.TestCase):
                                end="2026-09-04T10:30:00+10:00"),
             calendar_id="plan@group.calendar.google.com"))
         self.assertEqual(service.events().insert_kwargs["sendUpdates"], "none")
+
+    def test_update_event_never_sends_invitations(self):
+        provider, service = _provider([])
+        asyncio.run(provider.update_event(
+            "ev1",
+            CreateEventRequest(title="x", start="2026-09-04T10:00:00+10:00",
+                               end="2026-09-04T10:30:00+10:00")))
+        self.assertEqual(service.events().patch_kwargs["sendUpdates"], "none")
+
+    def test_update_event_targets_the_requested_calendar(self):
+        provider, service = _provider([])
+        asyncio.run(provider.update_event(
+            "ev1",
+            CreateEventRequest(title="x", start="2026-09-04T10:00:00+10:00",
+                               end="2026-09-04T10:30:00+10:00"),
+            calendar_id="plan@group.calendar.google.com"))
+        self.assertEqual(
+            service.events().patch_kwargs["calendarId"],
+            "plan@group.calendar.google.com",
+        )
+
+    def test_update_event_defaults_to_configured_calendar(self):
+        provider, service = _provider([])
+        asyncio.run(provider.update_event(
+            "ev1",
+            CreateEventRequest(title="x", start="2026-09-04T10:00:00+10:00",
+                               end="2026-09-04T10:30:00+10:00")))
+        self.assertEqual(service.events().patch_kwargs["calendarId"], "primary")
+
+    def test_delete_event_never_sends_invitations(self):
+        provider, service = _provider([])
+        asyncio.run(provider.delete_event("ev1"))
+        self.assertEqual(service.events().delete_kwargs["sendUpdates"], "none")
+
+    def test_delete_event_targets_the_requested_calendar(self):
+        provider, service = _provider([])
+        asyncio.run(provider.delete_event(
+            "ev1", calendar_id="plan@group.calendar.google.com"))
+        self.assertEqual(
+            service.events().delete_kwargs["calendarId"],
+            "plan@group.calendar.google.com",
+        )
 
 
 class TestNullProvider(unittest.TestCase):
