@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from core.pending_actions import PendingActionStore
+from core.planning.engine import free_intervals
+from core.planning.models import TimeWindow
 from provider.calendar import CreateEventRequest, get_calendar_provider
 from provider.places import build_map_links
 from tools.base import BaseTool, ToolErrorCode, ToolResult, tool
@@ -124,14 +126,38 @@ def build_calendar_capabilities(
             events = await provider.list_day(date, zone)
         except Exception as e:  # noqa: BLE001 - mapped to stable error codes
             return provider_exception_to_result(e).to_tool_content()
-        if not events:
-            return ToolResult.success(f"No events on {date}.").to_tool_content()
+
         lines = []
-        for event in events:
-            when = "all day" if event.all_day else f"{event.start} → {event.end}"
-            note = " (free)" if event.transparent else ""
-            note += " (declined)" if event.self_declined else ""
-            lines.append(f"- {event.title} ({when}){note}")
+        if not events:
+            lines.append(f"No events on {date}.")
+        else:
+            for event in events:
+                when = "all day" if event.all_day else f"{event.start} → {event.end}"
+                note = " (free)" if event.transparent else ""
+                note += " (declined)" if event.self_declined else ""
+                lines.append(f"- {event.title} ({when}){note}")
+
+        # Full calendar day, no buffer: this is a general-purpose capability,
+        # not the planner's own windowed placement (build_day_plan applies
+        # planning.schedulable_window/buffer_minutes internally). Binding this
+        # tool to planning config would make it lie about the rest of the day
+        # and couple the calendar domain to planning. Reuses free_intervals
+        # rather than recomputing gaps inline: all-day, transparent ("Free"),
+        # and self-declined events are excluded from busy time there, so this
+        # capability inherits that behavior instead of duplicating it.
+        intervals = free_intervals(
+            events, TimeWindow(start="00:00", end="23:59"), 0, date, zone
+        )
+        lines.append("free:")
+        if intervals:
+            for interval in intervals:
+                lines.append(
+                    f"- {interval.start.strftime('%H:%M')}"
+                    f"-{interval.end.strftime('%H:%M')}"
+                )
+        else:
+            lines.append("- none")
+
         return ToolResult.success("\n".join(lines)).to_tool_content()
 
     @tool(

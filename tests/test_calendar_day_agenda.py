@@ -392,7 +392,9 @@ class TestDayAgendaTool(unittest.IsolatedAsyncioTestCase):
                 )
             finally:
                 ct.get_calendar_provider = orig
-            self.assertEqual(raw, "No events on 2026-09-04.")
+            self.assertEqual(
+                raw, "No events on 2026-09-04.\nfree:\n- 00:00-23:59"
+            )
 
     async def test_annotates_all_day_free_and_declined_events(self):
         import tools.calendar_tools as ct
@@ -438,6 +440,111 @@ class TestDayAgendaTool(unittest.IsolatedAsyncioTestCase):
                           "2026-09-04T12:00:00+10:00) (free)", raw)
             self.assertIn("- Optional sync (2026-09-04T13:00:00+10:00 → "
                           "2026-09-04T13:30:00+10:00) (declined)", raw)
+
+    async def test_two_spaced_meetings_yield_gap_intervals(self):
+        import tools.calendar_tools as ct
+
+        events = [
+            CalendarEvent(
+                id="e1", title="Morning sync",
+                start="2026-09-04T09:00:00+10:00", end="2026-09-04T10:00:00+10:00",
+            ),
+            CalendarEvent(
+                id="e2", title="Afternoon review",
+                start="2026-09-04T14:00:00+10:00", end="2026-09-04T15:00:00+10:00",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_enabled_context(tmp)
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: _DayStub(events)
+            try:
+                tool_obj = _day_agenda_tool(context)
+                raw = await tool_obj.execute(
+                    session=SimpleNamespace(shared_context=context),
+                    date="2026-09-04",
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertIn("free:", raw)
+            self.assertIn("- 00:00-09:00", raw)
+            self.assertIn("- 10:00-14:00", raw)
+            self.assertIn("- 15:00-23:59", raw)
+
+    async def test_all_day_event_does_not_consume_time(self):
+        import tools.calendar_tools as ct
+
+        events = [
+            CalendarEvent(
+                id="e1", title="Public holiday",
+                start="2026-09-04", end="2026-09-05", all_day=True,
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_enabled_context(tmp)
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: _DayStub(events)
+            try:
+                tool_obj = _day_agenda_tool(context)
+                raw = await tool_obj.execute(
+                    session=SimpleNamespace(shared_context=context),
+                    date="2026-09-04",
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertIn("- 00:00-23:59", raw)
+
+    async def test_declined_and_transparent_events_do_not_consume_time(self):
+        import tools.calendar_tools as ct
+
+        events = [
+            CalendarEvent(
+                id="e1", title="Focus block",
+                start="2026-09-04T10:00:00+10:00", end="2026-09-04T12:00:00+10:00",
+                transparent=True,
+            ),
+            CalendarEvent(
+                id="e2", title="Optional sync",
+                start="2026-09-04T13:00:00+10:00", end="2026-09-04T14:00:00+10:00",
+                self_declined=True,
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_enabled_context(tmp)
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: _DayStub(events)
+            try:
+                tool_obj = _day_agenda_tool(context)
+                raw = await tool_obj.execute(
+                    session=SimpleNamespace(shared_context=context),
+                    date="2026-09-04",
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertIn("- 00:00-23:59", raw)
+
+    async def test_full_day_meeting_reports_no_free_intervals(self):
+        import tools.calendar_tools as ct
+
+        events = [
+            CalendarEvent(
+                id="e1", title="Offsite",
+                start="2026-09-04T00:00:00+10:00", end="2026-09-05T00:00:00+10:00",
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_enabled_context(tmp)
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: _DayStub(events)
+            try:
+                tool_obj = _day_agenda_tool(context)
+                raw = await tool_obj.execute(
+                    session=SimpleNamespace(shared_context=context),
+                    date="2026-09-04",
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertIn("free:\n- none", raw)
 
     async def test_defaults_timezone_from_config_when_not_passed(self):
         import tools.calendar_tools as ct
