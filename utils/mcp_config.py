@@ -111,6 +111,14 @@ class McpServerConfig(BaseModel):
 
     tool_policies: dict[str, McpToolPolicy] = Field(default_factory=dict)
 
+    # Whether allowlisted tools become agent-visible capabilities. Default true
+    # preserves existing behavior. Set false for a server the host calls on the
+    # model's behalf but whose payloads must never enter a transcript — e.g. a
+    # readiness document carrying raw HRV and resting heart rate, where exposure
+    # would defeat a strict projection allowlist regardless of which agent
+    # happened to be running.
+    expose_to_agents: bool = True
+
     # Server-supplied instructions are untrusted; keep them out of prompts unless
     # an operator explicitly opts in.
     use_server_instructions: bool = False
