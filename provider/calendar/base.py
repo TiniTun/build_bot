@@ -28,6 +28,15 @@ class CalendarEvent(BaseModel):
     attendees: list[str] = Field(default_factory=list)
     location: str | None = None
     description: str | None = None
+    # True for a date-only Google event. All-day events are preserved and
+    # reported but consume no time: treating one as busy would blank the day.
+    all_day: bool = False
+    # Google "Free" (transparency: transparent) — shown, but not busy.
+    transparent: bool = False
+    # The user declined this invitation; it is not their time.
+    self_declined: bool = False
+    # extendedProperties.private. Carries the planner's ownership marker.
+    private_properties: dict[str, str] = Field(default_factory=dict)
 
 
 class AvailabilityResult(BaseModel):
@@ -46,6 +55,7 @@ class CreateEventRequest(BaseModel):
     attendees: list[str] = Field(default_factory=list)
     location: str | None = None
     description: str | None = None
+    private_properties: dict[str, str] = Field(default_factory=dict)
 
 
 @runtime_checkable

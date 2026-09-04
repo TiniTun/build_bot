@@ -74,18 +74,26 @@ def _event_from_item(item: dict[str, Any]) -> CalendarEvent:
     """Map a Google Calendar event resource into a ``CalendarEvent``."""
     start = item.get("start", {})
     end = item.get("end", {})
+    attendees = [
+        a for a in item.get("attendees", []) if isinstance(a, dict)
+    ]
+    extended = item.get("extendedProperties") or {}
+    private = extended.get("private") or {}
     return CalendarEvent(
         id=item.get("id"),
         title=item.get("summary", ""),
         start=start.get("dateTime") or start.get("date", ""),
         end=end.get("dateTime") or end.get("date", ""),
-        attendees=[
-            a["email"]
-            for a in item.get("attendees", [])
-            if isinstance(a, dict) and a.get("email")
-        ],
+        attendees=[a["email"] for a in attendees if a.get("email")],
         location=item.get("location"),
         description=item.get("description"),
+        # A date-only start is Google's all-day representation.
+        all_day="dateTime" not in start and "date" in start,
+        transparent=item.get("transparency") == "transparent",
+        self_declined=any(
+            a.get("self") and a.get("responseStatus") == "declined" for a in attendees
+        ),
+        private_properties={str(k): str(v) for k, v in private.items()},
     )
 
 
@@ -108,6 +116,8 @@ def _event_body(
         body["location"] = request.location
     if request.description:
         body["description"] = request.description
+    if request.private_properties:
+        body["extendedProperties"] = {"private": dict(request.private_properties)}
     return body
 
 
