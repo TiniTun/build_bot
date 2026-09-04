@@ -174,6 +174,10 @@ class TasksProviderConfig(BaseModel):
     provider: str | None = "todoist"
     enabled: bool = False
     api_token_env: str = "TODOIST_API_TOKEN"
+    # Minutes assigned to a task carrying no duration label. The planner marks
+    # such estimates assumed so a summary can say so rather than implying the
+    # user stated it.
+    default_duration_minutes: int = Field(default=30, gt=0, le=480)
 
 
 class ExternalToolsConfig(BaseModel):

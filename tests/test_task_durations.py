@@ -33,3 +33,30 @@ class TestParseDurationLabel(unittest.TestCase):
         task = Task(id="1", content="x")
         self.assertIsNone(task.estimated_minutes)
         self.assertFalse(task.duration_assumed)
+
+
+def _raw(labels, **over):
+    data = {"id": "8241", "content": "Draft invoice", "labels": labels, "priority": 1}
+    data.update(over)
+    return data
+
+
+class TestTodoistDurationMapping(unittest.TestCase):
+    def test_label_duration_is_not_assumed(self):
+        from provider.tasks.todoist import _to_task
+
+        task = _to_task(_raw(["45m"]), default_minutes=30)
+        self.assertEqual(task.estimated_minutes, 45)
+        self.assertFalse(task.duration_assumed)
+
+    def test_missing_label_uses_configured_fallback_and_marks_assumed(self):
+        from provider.tasks.todoist import _to_task
+
+        task = _to_task(_raw(["work"]), default_minutes=25)
+        self.assertEqual(task.estimated_minutes, 25)
+        self.assertTrue(task.duration_assumed)
+
+    def test_config_default_is_thirty_minutes(self):
+        from utils.config import TasksProviderConfig
+
+        self.assertEqual(TasksProviderConfig().default_duration_minutes, 30)

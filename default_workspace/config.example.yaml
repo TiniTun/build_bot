@@ -91,6 +91,8 @@ default_agent: pickle
 #     # The API token is read from this environment variable, never from config.
 #     # Create one at https://todoist.com/app/settings/integrations/developer
 #     api_token_env: TODOIST_API_TOKEN
+#     # Minutes assumed for a task with no duration label (15m/30m/60m/90m/1h).
+#     default_duration_minutes: 30
 # tools:
 #   # When enabled_capabilities is set, only listed dotted ids are available. The
 #   # final per-agent tool set is the intersection of this list and the agent's
