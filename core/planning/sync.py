@@ -4,15 +4,18 @@ Pure diffing plus the guards. The provider calls live in a later task;
 nothing here performs I/O.
 """
 
+import json
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
     from core.planning.models import DayPlan, PatternLimits, PlannedEvent
     from provider.calendar.base import CalendarEvent
+    from utils.config import Config
 
 logger = logging.getLogger(__name__)
 
@@ -208,3 +211,52 @@ def check_guards(
             raise GuardError(
                 f"refusing to {action.op} foreign event {action.event_id}"
             )
+
+
+class PlanRunLedger:
+    """Once-per-date bookkeeping under ``<event_path>/planning/``.
+
+    Needed specifically because of `shadow` mode: nothing is written to the
+    calendar there, so the calendar cannot serve as the record of "already
+    planned today". The cron fires every 30 minutes through the morning
+    (WHOOP may not have opened today's cycle yet at 05:00), so the same date
+    is ticked many times; this ledger is what makes those ticks idempotent.
+    Mirrors ``PendingActionStore``'s one-file-per-record shape.
+    """
+
+    def __init__(self, config: "Config") -> None:
+        self._dir = config.event_path / "planning"
+
+    def _path(self, day: str) -> Path:
+        return self._dir / f"{day}.json"
+
+    def _read(self, day: str) -> dict[str, Any]:
+        path = self._path(day)
+        if not path.is_file():
+            return {}
+        try:
+            return json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as e:
+            # A corrupt/unreadable entry must not crash the morning run, but
+            # it must be visible: treated as "not yet planned", which can at
+            # worst re-plan an already-idempotent day.
+            logger.warning("planning ledger for %s is unreadable: %s; treating as unset", day, e)
+            return {}
+
+    def status(self, day: str) -> str | None:
+        """The recorded status for ``day``, or ``None`` if never planned."""
+        return self._read(day).get("status")
+
+    def plan_hash(self, day: str) -> str | None:
+        """The hash of the plan last applied for ``day``, if any."""
+        return self._read(day).get("plan_hash")
+
+    def mark_applied(self, day: str, plan_hash: str) -> None:
+        """Durably record that ``day`` has been planned."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        self._path(day).write_text(
+            json.dumps(
+                {"date": day, "status": "applied", "plan_hash": plan_hash},
+                sort_keys=True,
+            )
+        )
