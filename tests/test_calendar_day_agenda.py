@@ -5,16 +5,19 @@ tests/test_google_calendar.py. No network, no Google auth.
 """
 
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
-from provider.calendar.base import CreateEventRequest, NullCalendarProvider
+from provider.calendar.base import CalendarEvent, CreateEventRequest, NullCalendarProvider
 from provider.calendar.google_calendar import (
     GoogleCalendarProvider,
     _event_body,
     _event_from_item,
 )
 from provider.external_errors import AuthMissingError
+from tests.helpers import make_context, make_workspace
 
 
 class TestEventMapping(unittest.TestCase):
@@ -283,3 +286,230 @@ class TestNullProvider(unittest.TestCase):
     def test_list_day_reports_auth_missing_not_attribute_error(self):
         with self.assertRaises(AuthMissingError):
             asyncio.run(NullCalendarProvider().list_day("2026-09-04", "UTC"))
+
+
+class TestDayAgendaCapability(unittest.TestCase):
+    def test_capability_is_registered_when_calendar_is_enabled(self):
+        from tools.calendar_tools import build_calendar_capabilities
+        from utils.config import ExternalProviderConfig
+
+        config = SimpleNamespace(
+            external_tools=SimpleNamespace(
+                calendar=ExternalProviderConfig(enabled=True,
+                                                provider="google_calendar")),
+            timezone="Australia/Brisbane", places=None)
+        ids = [cap.id for cap, _ in build_calendar_capabilities(config)]
+        self.assertIn("calendar.day_agenda", ids)
+
+    def test_day_agenda_is_read_risk(self):
+        from tools.calendar_tools import build_calendar_capabilities
+        from tools.capabilities import ToolRiskLevel
+        from utils.config import ExternalProviderConfig
+
+        config = SimpleNamespace(
+            external_tools=SimpleNamespace(
+                calendar=ExternalProviderConfig(enabled=True,
+                                                provider="google_calendar")),
+            timezone="Australia/Brisbane", places=None)
+        cap = next(c for c, _ in build_calendar_capabilities(config)
+                   if c.id == "calendar.day_agenda")
+        self.assertEqual(cap.risk_level, ToolRiskLevel.READ)
+
+
+class _DayStub:
+    """Records ``list_day`` calls; ``search`` raises so a wrong-method mutation
+    surfaces as a mapped provider error instead of silently succeeding."""
+
+    def __init__(self, events):
+        self._events = events
+        self.list_day_calls = []
+
+    async def list_day(self, day, timezone, calendar_id=None):
+        self.list_day_calls.append((day, timezone, calendar_id))
+        return self._events
+
+    async def search(self, query, time_min=None, time_max=None):
+        raise AssertionError("day_agenda must call list_day, not search")
+
+
+def _day_agenda_tool(context):
+    from tools.calendar_tools import build_calendar_capabilities
+
+    return next(
+        pair[1]
+        for pair in build_calendar_capabilities(context.config)
+        if pair[0].id == "calendar.day_agenda"
+    )
+
+
+def _calendar_enabled_context(tmp):
+    from utils.config import ExternalProviderConfig, ExternalToolsConfig
+
+    workspace = make_workspace(Path(tmp))
+    context = make_context(workspace)
+    context.config.external_tools = ExternalToolsConfig(
+        calendar=ExternalProviderConfig(enabled=True, provider="google_calendar")
+    )
+    context.config.timezone = "Australia/Brisbane"
+    return context
+
+
+class TestDayAgendaTool(unittest.IsolatedAsyncioTestCase):
+    async def test_calls_list_day_not_search(self):
+        import tools.calendar_tools as ct
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_enabled_context(tmp)
+            stub = _DayStub([])
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: stub
+            try:
+                tool_obj = _day_agenda_tool(context)
+                raw = await tool_obj.execute(
+                    session=SimpleNamespace(shared_context=context),
+                    date="2026-09-04",
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertEqual(
+                stub.list_day_calls,
+                [("2026-09-04", "Australia/Brisbane", None)],
+            )
+            self.assertIn("No events on 2026-09-04.", raw)
+
+    async def test_no_events_message(self):
+        import tools.calendar_tools as ct
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_enabled_context(tmp)
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: _DayStub([])
+            try:
+                tool_obj = _day_agenda_tool(context)
+                raw = await tool_obj.execute(
+                    session=SimpleNamespace(shared_context=context),
+                    date="2026-09-04",
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertEqual(raw, "No events on 2026-09-04.")
+
+    async def test_annotates_all_day_free_and_declined_events(self):
+        import tools.calendar_tools as ct
+
+        events = [
+            CalendarEvent(
+                id="e1", title="Standup",
+                start="2026-09-04T09:00:00+10:00", end="2026-09-04T09:15:00+10:00",
+            ),
+            CalendarEvent(
+                id="e2", title="Public holiday",
+                start="2026-09-04", end="2026-09-05", all_day=True,
+            ),
+            CalendarEvent(
+                id="e3", title="Focus block",
+                start="2026-09-04T10:00:00+10:00", end="2026-09-04T12:00:00+10:00",
+                transparent=True,
+            ),
+            CalendarEvent(
+                id="e4", title="Optional sync",
+                start="2026-09-04T13:00:00+10:00", end="2026-09-04T13:30:00+10:00",
+                self_declined=True,
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_enabled_context(tmp)
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: _DayStub(events)
+            try:
+                tool_obj = _day_agenda_tool(context)
+                raw = await tool_obj.execute(
+                    session=SimpleNamespace(shared_context=context),
+                    date="2026-09-04",
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertIn(
+                "- Standup (2026-09-04T09:00:00+10:00 → 2026-09-04T09:15:00+10:00)",
+                raw,
+            )
+            self.assertIn("- Public holiday (all day)", raw)
+            self.assertIn("- Focus block (2026-09-04T10:00:00+10:00 → "
+                          "2026-09-04T12:00:00+10:00) (free)", raw)
+            self.assertIn("- Optional sync (2026-09-04T13:00:00+10:00 → "
+                          "2026-09-04T13:30:00+10:00) (declined)", raw)
+
+    async def test_defaults_timezone_from_config_when_not_passed(self):
+        import tools.calendar_tools as ct
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = _calendar_enabled_context(tmp)
+            stub = _DayStub([])
+            orig = ct.get_calendar_provider
+            ct.get_calendar_provider = lambda config: stub
+            try:
+                tool_obj = _day_agenda_tool(context)
+                await tool_obj.execute(
+                    session=SimpleNamespace(shared_context=context),
+                    date="2026-09-04", timezone="Europe/London",
+                )
+            finally:
+                ct.get_calendar_provider = orig
+            self.assertEqual(
+                stub.list_day_calls, [("2026-09-04", "Europe/London", None)]
+            )
+
+
+class TestPlanningCapabilityRegistration(unittest.TestCase):
+    def _planning_context(self, tmp):
+        from utils.config import PlanningConfig
+
+        workspace = make_workspace(Path(tmp))
+        context = make_context(workspace)
+        context.config.planning = PlanningConfig(enabled=True)
+        return context
+
+    def test_planning_capabilities_are_registered(self):
+        from tools.capability_catalog import build_capability_registry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._planning_context(tmp)
+            agent_def = context.agent_loader.load("pickle")
+            registry = build_capability_registry(
+                agent_def, context, include_post_message=False
+            )
+            ids = [cap.id for cap in registry.capabilities()]
+            self.assertIn("planning.build_day_plan", ids)
+            self.assertIn("planning.sync_daily_plan", ids)
+
+    def test_absent_planning_config_registers_no_planning_capabilities(self):
+        from tools.capability_catalog import build_capability_registry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = make_context(workspace)
+            agent_def = context.agent_loader.load("pickle")
+            registry = build_capability_registry(
+                agent_def, context, include_post_message=False
+            )
+            ids = [cap.id for cap in registry.capabilities()]
+            self.assertNotIn("planning.build_day_plan", ids)
+            self.assertNotIn("planning.sync_daily_plan", ids)
+
+    def test_planning_confirmed_executor_resolves_sync_daily_plan(self):
+        from tools.capability_catalog import build_confirmed_executor_registry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._planning_context(tmp)
+            registry = build_confirmed_executor_registry(context.config)
+            executor = registry.get("planning.sync_daily_plan")
+            self.assertTrue(callable(executor))
+
+    def test_absent_planning_config_has_no_confirmed_executor(self):
+        from tools.capability_catalog import build_confirmed_executor_registry
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = make_context(workspace)
+            registry = build_confirmed_executor_registry(context.config)
+            self.assertIsNone(registry.get("planning.sync_daily_plan"))

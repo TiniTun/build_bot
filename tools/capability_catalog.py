@@ -28,6 +28,10 @@ from tools.email_tools import (
 from tools.mcp_tools import build_mcp_capabilities
 from tools.memory_tools import build_memory_capabilities
 from tools.places_tools import build_places_capabilities
+from tools.planning_tools import (
+    build_planning_capabilities,
+    build_planning_confirmed_executors,
+)
 from tools.post_message_tool import create_post_message_tool
 from tools.skill_run_script_tool import create_skill_run_script_tool
 from tools.skill_tool import create_skill_tool
@@ -235,6 +239,8 @@ def build_capability_registry(
         registry.register(capability, tool)
     for capability, tool in build_memory_capabilities(config):
         registry.register(capability, tool)
+    for capability, tool in build_planning_capabilities(config):
+        registry.register(capability, tool)
 
     # MCP tools are gated here rather than by ToolPolicy so they stay fail-closed
     # even in permissive legacy mode (no `tools:` block). Only tools an operator
@@ -259,4 +265,5 @@ def build_confirmed_executor_registry(config: "Config") -> ConfirmedExecutorRegi
     registry.merge(build_email_confirmed_executors(config))
     registry.merge(build_calendar_confirmed_executors(config))
     registry.merge(build_task_confirmed_executors(config))
+    registry.merge(build_planning_confirmed_executors(config))
     return registry

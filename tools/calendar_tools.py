@@ -99,6 +99,42 @@ def build_calendar_capabilities(
         return ToolResult.success("\n".join(lines)).to_tool_content()
 
     @tool(
+        name="calendar_day_agenda",
+        description=(
+            "Every event on a date plus the free intervals between them. "
+            "Returns the whole day, not a search."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "date": {"type": "string",
+                         "description": "The day, as YYYY-MM-DD."},
+                "timezone": {"type": "string",
+                             "description": "IANA timezone (optional; "
+                                            "defaults to the configured one)."},
+            },
+            "required": ["date"],
+        },
+    )
+    async def calendar_day_agenda(
+        date: str, session: "AgentSession", timezone: str | None = None
+    ) -> str:
+        zone = timezone or getattr(config, "timezone", None) or "UTC"
+        try:
+            events = await provider.list_day(date, zone)
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return provider_exception_to_result(e).to_tool_content()
+        if not events:
+            return ToolResult.success(f"No events on {date}.").to_tool_content()
+        lines = []
+        for event in events:
+            when = "all day" if event.all_day else f"{event.start} → {event.end}"
+            note = " (free)" if event.transparent else ""
+            note += " (declined)" if event.self_declined else ""
+            lines.append(f"- {event.title} ({when}){note}")
+        return ToolResult.success("\n".join(lines)).to_tool_content()
+
+    @tool(
         name="calendar_availability",
         description="Check free/busy availability for attendees over a time window.",
         parameters={
@@ -339,6 +375,18 @@ def build_calendar_capabilities(
                 required_config=["external_tools.calendar"],
             ),
             calendar_availability,
+        ),
+        (
+            CapabilityDef(
+                id="calendar.day_agenda",
+                tool_name="calendar_day_agenda",
+                domain="calendar",
+                operation="day_agenda",
+                description="List every event and free interval for one date.",
+                risk_level=ToolRiskLevel.READ,
+                required_config=["external_tools.calendar"],
+            ),
+            calendar_day_agenda,
         ),
         (
             CapabilityDef(
