@@ -157,6 +157,8 @@ default_agent: pickle
 #         movies_record_feedback: {effect: write, confirmation: none, retry: never}
 #       use_server_instructions: false   # keep untrusted server guidance out of prompts
 
+# The blank line above is deliberate: the config tests parse a continuous
+# `# mcp:` comment run as one server set, so each MCP example (new ones too) needs its own block.
 # A second server entry for the same `mcp.servers` mapping above: the
 # host-only readiness source for the daily planner. Merge it under the same
 # `servers:` key as movies_db if you want both active. The host calls this
