@@ -4,8 +4,23 @@ import unittest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from core.planning.models import PlannedEvent
-from core.planning.sync import OWNER, diff, is_owned, marker
+from core.planning.models import (
+    DayPlan,
+    PatternLimits,
+    PlannedEvent,
+    ReadinessSignal,
+    TimeWindow,
+)
+from core.planning.sync import (
+    GuardError,
+    OWNER,
+    SyncAction,
+    SyncPlan,
+    check_guards,
+    diff,
+    is_owned,
+    marker,
+)
 from provider.calendar.base import CalendarEvent
 
 TZ = ZoneInfo("Australia/Brisbane")
@@ -209,6 +224,84 @@ class TestMutationCoverage(unittest.TestCase):
         plan = diff([], [foreign], plan_date=DAY)
         self.assertEqual(plan.deletes, [])
         self.assertEqual(plan.refused_foreign, ["foreign2"])
+
+
+LIMITS = PatternLimits(schedulable_window=TimeWindow(start="10:00", end="14:45"))
+PLAN_CAL = "plan@group.calendar.google.com"
+
+
+def _day_plan(events):
+    return DayPlan(
+        date=DAY, timezone="Australia/Brisbane",
+        readiness=ReadinessSignal(verdict="green", source="whoop",
+                                  retry_eligible=False, note="n"),
+        events=events,
+    )
+
+
+def _guard(day_plan, sync=None, *, planning_calendar_id=PLAN_CAL,
+           read_calendar_id="primary", max_events=12):
+    check_guards(day_plan, sync or SyncPlan(),
+                 planning_calendar_id=planning_calendar_id,
+                 read_calendar_id=read_calendar_id,
+                 limits=LIMITS, max_events_per_day=max_events)
+
+
+class TestGuards(unittest.TestCase):
+    def test_a_valid_plan_passes(self):
+        _guard(_day_plan([_planned("pattern:mon:walk", "Walk", "12:00", "12:30")]))
+
+    def test_unset_planning_calendar_is_refused(self):
+        with self.assertRaisesRegex(GuardError, "planning_calendar_id"):
+            _guard(_day_plan([]), planning_calendar_id=None)
+
+    def test_primary_as_planning_calendar_is_refused(self):
+        with self.assertRaisesRegex(GuardError, "primary"):
+            _guard(_day_plan([]), planning_calendar_id="primary")
+
+    def test_planning_calendar_equal_to_the_read_calendar_is_refused(self):
+        with self.assertRaisesRegex(GuardError, "same calendar"):
+            _guard(_day_plan([]), planning_calendar_id="work@example.com",
+                   read_calendar_id="work@example.com")
+
+    def test_resolved_primary_is_compared_when_read_calendar_is_unset(self):
+        # provider_cfg.calendar_id may be None, which resolves to "primary".
+        with self.assertRaisesRegex(GuardError, "primary"):
+            _guard(_day_plan([]), planning_calendar_id="primary",
+                   read_calendar_id="primary")
+
+    def test_event_on_another_date_is_refused(self):
+        stray = PlannedEvent(
+            slot_key="x", title="Stray",
+            start=datetime.fromisoformat("2026-09-05T12:00:00+10:00"),
+            end=datetime.fromisoformat("2026-09-05T12:30:00+10:00"))
+        with self.assertRaisesRegex(GuardError, "date"):
+            _guard(_day_plan([stray]))
+
+    def test_event_outside_the_schedulable_window_is_refused(self):
+        with self.assertRaisesRegex(GuardError, "window"):
+            _guard(_day_plan([_planned("x", "Late", "20:00", "20:30")]))
+
+    def test_too_many_events_is_refused(self):
+        events = [_planned(f"task:{i}", f"T{i}", "10:00", "10:15") for i in range(13)]
+        with self.assertRaisesRegex(GuardError, "max_events_per_day"):
+            _guard(_day_plan(events), max_events=12)
+
+    def test_patching_a_foreign_event_id_is_refused(self):
+        sync = SyncPlan(
+            patches=[SyncAction(op="patch", slot_key="x", title="T",
+                                start=None, end=None, event_id="foreign1")],
+            refused_foreign=["foreign1"])
+        with self.assertRaisesRegex(GuardError, "foreign"):
+            _guard(_day_plan([]), sync)
+
+    def test_deleting_a_foreign_event_id_is_refused(self):
+        sync = SyncPlan(
+            deletes=[SyncAction(op="delete", slot_key="x", title="T",
+                                event_id="foreign1")],
+            refused_foreign=["foreign1"])
+        with self.assertRaisesRegex(GuardError, "foreign"):
+            _guard(_day_plan([]), sync)
 
 
 if __name__ == "__main__":

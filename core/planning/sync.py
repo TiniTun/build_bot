@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
-    from core.planning.models import PlannedEvent
+    from core.planning.models import DayPlan, PatternLimits, PlannedEvent
     from provider.calendar.base import CalendarEvent
 
 logger = logging.getLogger(__name__)
@@ -153,3 +153,58 @@ def diff(
                 event_id=event.id))
 
     return plan
+
+
+def check_guards(
+    plan: "DayPlan",
+    sync: SyncPlan,
+    *,
+    planning_calendar_id: str | None,
+    read_calendar_id: str,
+    limits: "PatternLimits",
+    max_events_per_day: int,
+) -> None:
+    """Every precondition for a write. Raises ``GuardError`` on the first failure.
+
+    Evaluated before any provider call, so a batch is refused whole rather than
+    applied halfway. ``read_calendar_id`` must already be the resolved read
+    calendar (``provider_cfg.calendar_id or "primary"``); this function does
+    not perform that resolution itself.
+    """
+    if not planning_calendar_id:
+        raise GuardError(
+            "planning_calendar_id is not configured; refusing to write anywhere"
+        )
+    if planning_calendar_id.strip().lower() == "primary":
+        raise GuardError("refusing to write to 'primary'")
+    if planning_calendar_id == read_calendar_id:
+        raise GuardError(
+            "planning and read calendars are the same calendar; refusing to write"
+        )
+
+    if len(plan.events) > max_events_per_day:
+        raise GuardError(
+            f"{len(plan.events)} events exceeds max_events_per_day "
+            f"({max_events_per_day})"
+        )
+
+    window = limits.schedulable_window
+    window_start, window_end = window.as_times()
+    for event in plan.events:
+        if event.start.date().isoformat() != plan.date:
+            raise GuardError(
+                f"{event.slot_key} is on {event.start.date()}, not the planned "
+                f"date {plan.date}"
+            )
+        if event.start.time() < window_start or event.end.time() > window_end:
+            raise GuardError(
+                f"{event.slot_key} falls outside the schedulable window "
+                f"{window.start}-{window.end}"
+            )
+
+    foreign = set(sync.refused_foreign)
+    for action in (*sync.patches, *sync.deletes):
+        if action.event_id in foreign:
+            raise GuardError(
+                f"refusing to {action.op} foreign event {action.event_id}"
+            )
