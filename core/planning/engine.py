@@ -7,7 +7,7 @@ or an LLM.
 
 from typing import TYPE_CHECKING, Any, Mapping
 
-from core.planning.models import ReadinessSignal
+from core.planning.models import ReadinessSignal, ReadinessSource
 
 if TYPE_CHECKING:
     from provider.mcp.models import McpCallResult
@@ -31,7 +31,7 @@ _NOTES: dict[str, str] = {
 }
 
 
-def _unknown(source: str, *, retry: bool) -> ReadinessSignal:
+def _unknown(source: ReadinessSource, *, retry: bool) -> ReadinessSignal:
     return ReadinessSignal(
         verdict="unknown", source=source, retry_eligible=retry, note=_NOTES[source]
     )

@@ -8,7 +8,10 @@ day as `unknown`.
 import json
 import unittest
 
+from pydantic import ValidationError
+
 from core.planning.engine import project_readiness
+from core.planning.models import ReadinessSignal
 from provider.mcp.models import McpCallResult
 
 NO_CYCLE_META = "health-planner/no_cycle_yet"
@@ -74,7 +77,9 @@ def _ok(structured, meta=None):
     )
 
 
-def _failed(text: str = "boom"):
+def _failed(text: str = "WHOOP 401 for cycle 918273645: recovery 32"):
+    # Digit-bearing prose on purpose: if a future change ever echoed
+    # `text_blocks` into `note`, the leak sweep below would catch it.
     return McpCallResult(
         server_id=SERVER_ID,
         tool_name=TOOL_NAME,
@@ -140,12 +145,38 @@ class TestVerdictProjection(unittest.TestCase):
         signal = project_readiness(_ok(doc), planned_date="2026-09-04")
         self.assertEqual(signal.verdict, "unknown")
         self.assertEqual(signal.source, "date_mismatch")
+        self.assertTrue(signal.retry_eligible)
 
     def test_unrecognised_verdict_is_not_trusted(self):
         doc = {**_green_document(), "mode": "chartreuse", "date": "2026-09-04"}
-        self.assertEqual(
-            project_readiness(_ok(doc), planned_date="2026-09-04").verdict, "unknown"
-        )
+        signal = project_readiness(_ok(doc), planned_date="2026-09-04")
+        self.assertEqual(signal.verdict, "unknown")
+        self.assertEqual(signal.source, "unavailable")
+
+    def test_failed_call_with_no_status_follow_up_still_retries(self):
+        # status=None is the real path when the whoop_status follow-up call
+        # itself fails; the default must stay retry-friendly, not silently
+        # flip to non-retryable.
+        signal = project_readiness(_failed(), planned_date="2026-09-04")
+        self.assertEqual(signal.source, "unavailable")
+        self.assertTrue(signal.retry_eligible)
+
+
+def _scalars(node):
+    """Yield every leaf scalar in a JSON-shaped structure, recursively.
+
+    Used to sweep the *entire* document — including nested blocks like
+    `history` — rather than a hand-picked list of top-level field names,
+    which a reviewer showed misses nested leaks entirely.
+    """
+    if isinstance(node, dict):
+        for v in node.values():
+            yield from _scalars(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _scalars(v)
+    elif node is not None:
+        yield node
 
 
 class TestNoMetricLeaks(unittest.TestCase):
@@ -167,6 +198,43 @@ class TestNoMetricLeaks(unittest.TestCase):
                 str(value), rendered, f"{field} leaked into the projected signal"
             )
 
+    def test_no_value_anywhere_in_the_document_appears_in_the_signal(self):
+        # Descends into nested blocks (e.g. `history`) that a top-level-only
+        # field sweep would never see.
+        doc = {**_green_document(), "mode": "green", "date": "2026-09-04"}
+        signal = project_readiness(_ok(doc), planned_date="2026-09-04")
+        rendered = signal.model_dump_json()
+        for value in _scalars(doc):
+            if value == "green":  # the one allowlisted datum
+                continue
+            self.assertNotIn(str(value), rendered, f"{value!r} leaked into the signal")
+
+    def test_note_is_always_drawn_from_the_module_note_table(self):
+        # Stronger than any value sweep: proves `note` is one of a fixed set
+        # of planner-authored strings, never text derived from the document
+        # or from a failed call's prose.
+        from core.planning.engine import _NOTES
+
+        for mode in ("green", "yellow", "red"):
+            doc = {**_green_document(), "mode": mode, "date": "2026-09-04"}
+            self.assertIn(
+                project_readiness(_ok(doc), planned_date="2026-09-04").note,
+                set(_NOTES.values()),
+            )
+        for signal in (
+            project_readiness(None, planned_date="2026-09-04"),
+            project_readiness(_ok(None, {NO_CYCLE_META: True}), planned_date="2026-09-04"),
+            project_readiness(_failed(), planned_date="2026-09-04"),
+            project_readiness(
+                _failed(), planned_date="2026-09-04", status={"authorised": False}
+            ),
+            project_readiness(
+                _ok({**_green_document(), "date": "2026-09-03"}),
+                planned_date="2026-09-04",
+            ),
+        ):
+            self.assertIn(signal.note, set(_NOTES.values()))
+
     def test_reasons_prose_never_reaches_the_signal(self):
         # health_planner's reasons embed metrics:
         # "Recovery score was 32, below the yellow threshold (34)"
@@ -179,7 +247,6 @@ class TestNoMetricLeaks(unittest.TestCase):
         rendered = signal.model_dump_json()
         self.assertNotIn("Recovery score was", rendered)
         self.assertNotIn("5h 12m", rendered)
-        self.assertNotIn("32", rendered)
 
     def test_note_is_planner_authored_and_stable(self):
         doc = {**_green_document(), "mode": "yellow", "date": "2026-09-04"}
@@ -211,6 +278,23 @@ class TestUpstreamContractPins(unittest.TestCase):
         from core.planning.engine import NO_CYCLE_META_KEY
 
         self.assertEqual(NO_CYCLE_META_KEY, "health-planner/no_cycle_yet")
+
+
+class TestReadinessSignalSchema(unittest.TestCase):
+    """I1: `extra='forbid'` is the structural half of the allowlist."""
+
+    def test_extra_field_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            ReadinessSignal(
+                verdict="green", source="whoop", retry_eligible=False,
+                note="x", recovery_score=71.0,
+            )
+
+    def test_the_allowlist_is_exactly_these_four_fields(self):
+        self.assertEqual(
+            set(ReadinessSignal.model_fields),
+            {"verdict", "source", "retry_eligible", "note"},
+        )
 
 
 if __name__ == "__main__":
