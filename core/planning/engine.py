@@ -5,9 +5,11 @@ what makes every acceptance criterion testable without a network, a calendar,
 or an LLM.
 """
 
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Mapping
+from zoneinfo import ZoneInfo
 
-from core.planning.models import ReadinessSignal, ReadinessSource
+from core.planning.models import Interval, ReadinessSignal, ReadinessSource, TimeWindow
 
 if TYPE_CHECKING:
     from provider.mcp.models import McpCallResult
@@ -79,3 +81,78 @@ def project_readiness(
     return ReadinessSignal(
         verdict=verdict, source="whoop", retry_eligible=False, note=_NOTES[verdict]
     )
+
+
+def _at(day: str, hhmm: str, timezone: str) -> datetime:
+    """A local wall-clock time on the planned day, as an aware datetime."""
+    return datetime.combine(
+        datetime.strptime(day, "%Y-%m-%d").date(),
+        datetime.strptime(hhmm, "%H:%M").time(),
+        tzinfo=ZoneInfo(timezone),
+    )
+
+
+def _busy_spans(events: list[Any], timezone: str) -> list[tuple[datetime, datetime]]:
+    """Spans that genuinely occupy the user's time.
+
+    All-day events, Google "Free" (transparent) events, and declined
+    invitations are excluded: each is something to report, not something that
+    consumes the day. Treating an all-day marker as busy would blank out any
+    day carrying one.
+    """
+    spans: list[tuple[datetime, datetime]] = []
+    zone = ZoneInfo(timezone)
+    for event in events:
+        if event.all_day or event.transparent or event.self_declined:
+            continue
+        try:
+            start = datetime.fromisoformat(event.start)
+            end = datetime.fromisoformat(event.end)
+        except ValueError:
+            # An unparseable event is reported elsewhere but cannot be treated
+            # as free time; skipping it silently would over-schedule the day.
+            continue
+        spans.append((start.astimezone(zone), end.astimezone(zone)))
+    return spans
+
+
+def free_intervals(
+    events: list[Any],
+    window: TimeWindow,
+    buffer_minutes: int,
+    day: str,
+    timezone: str,
+) -> list[Interval]:
+    """Free spans inside the schedulable window, with buffers around each event.
+
+    Existing events are never modified — they are subtracted. This is the
+    mechanism behind "existing calendar events are never overwritten": the
+    planner can only ever place blocks in what is left over.
+    """
+    window_start = _at(day, window.start, timezone)
+    window_end = _at(day, window.end, timezone)
+    buffer = timedelta(minutes=buffer_minutes)
+
+    blocked: list[tuple[datetime, datetime]] = []
+    for start, end in _busy_spans(events, timezone):
+        padded_start, padded_end = start - buffer, end + buffer
+        if padded_end <= window_start or padded_start >= window_end:
+            continue
+        blocked.append((max(padded_start, window_start), min(padded_end, window_end)))
+
+    merged: list[list[datetime]] = []
+    for start, end in sorted(blocked):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+
+    intervals: list[Interval] = []
+    cursor = window_start
+    for start, end in merged:
+        if start > cursor:
+            intervals.append(Interval(start=cursor, end=start))
+        cursor = max(cursor, end)
+    if cursor < window_end:
+        intervals.append(Interval(start=cursor, end=window_end))
+    return intervals

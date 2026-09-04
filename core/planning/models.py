@@ -48,6 +48,18 @@ class TimeWindow(BaseModel):
         )
 
 
+class Interval(BaseModel):
+    """A half-open span of free time, [start, end)."""
+
+    model_config = ConfigDict(extra="forbid")
+    start: datetime
+    end: datetime
+
+    @property
+    def minutes(self) -> int:
+        return int((self.end - self.start).total_seconds() // 60)
+
+
 class PatternLimits(BaseModel):
     model_config = ConfigDict(extra="forbid")
     schedulable_window: TimeWindow
