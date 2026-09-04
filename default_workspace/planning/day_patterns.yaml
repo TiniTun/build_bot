@@ -1,0 +1,88 @@
+# Weekly routine pattern for the daily planner.
+#
+# `version` is required and must match what the build understands; an unknown
+# version is rejected rather than half-read.
+#
+# Per-activity fields:
+#   name              required; becomes the event title and part of slot_key
+#   duration_minutes  required
+#   priority          essential | high | medium | low        (default medium)
+#   flexibility       fixed | flexible                       (default flexible)
+#   energy            high | medium | low                    (default medium)
+#   category          work | recovery | admin | personal     (default work)
+#   fixed_time        "HH:MM" — or `window`, never both
+#   window            {start, end} — the activity may float inside it
+#
+# A weekday may be a plain list of activities, or a mapping that overrides any
+# `defaults` key alongside an `activities` list.
+version: 1
+
+defaults:
+  # The ONLY window the planner ever writes into.
+  schedulable_window: {start: "10:00", end: "14:45"}
+  buffer_minutes: 10          # gap kept around every placed block
+  max_scheduled_minutes: 180  # hard cap on placed work per day
+  min_free_minutes: 60        # this much of the window stays unscheduled
+  min_block_minutes: 20       # never place a fragment shorter than this
+
+weekdays:
+  mon:
+    - name: Deep work
+      duration_minutes: 60
+      priority: high
+      flexibility: flexible
+      energy: high
+      category: work
+    - name: Walk
+      duration_minutes: 30
+      fixed_time: "12:00"
+      priority: medium
+      flexibility: fixed
+      energy: low
+      category: recovery
+  tue:
+    - name: Deep work
+      duration_minutes: 60
+      priority: high
+      energy: high
+      category: work
+    - name: Walk
+      duration_minutes: 30
+      priority: medium
+      energy: low
+      category: recovery
+  wed:
+    - name: Deep work
+      duration_minutes: 60
+      priority: high
+      energy: high
+      category: work
+    - name: Admin block
+      duration_minutes: 30
+      priority: low
+      energy: low
+      category: admin
+  thu:
+    - name: Deep work
+      duration_minutes: 60
+      priority: high
+      energy: high
+      category: work
+    - name: Walk
+      duration_minutes: 30
+      priority: medium
+      energy: low
+      category: recovery
+  fri:
+    - name: Weekly review
+      duration_minutes: 45
+      priority: essential
+      energy: medium
+      category: admin
+    - name: Walk
+      duration_minutes: 30
+      priority: medium
+      energy: low
+      category: recovery
+  sat: []
+  sun: []
