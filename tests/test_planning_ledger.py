@@ -1,13 +1,18 @@
 """Once-per-date bookkeeping, driven by the planner's real cron schedule."""
 
+import asyncio
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
 
+from core.pending_actions import PendingActionStore
 from core.planning.sync import PlanRunLedger
 from tests.helpers import make_workspace
+from tools.planning_tools import SYNC_CAPABILITY_ID, build_planning_capabilities
 from utils.config import Config
+
+BUILD_CAPABILITY_ID = "planning.build_day_plan"
 
 DAY = "2026-09-04"
 # The literal schedule shipped in default_workspace/crons/daily-plan/CRON.md.
@@ -36,15 +41,21 @@ class TestLedger(unittest.TestCase):
     def test_marking_applied_is_durable_across_instances(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = _config(tmp)
-            PlanRunLedger(config).mark_applied(DAY, "hash1")
+            PlanRunLedger(config).mark_applied(DAY)
             fresh = PlanRunLedger(config)
             self.assertEqual(fresh.status(DAY), "applied")
-            self.assertEqual(fresh.plan_hash(DAY), "hash1")
+
+    def test_marking_applied_twice_is_harmless(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PlanRunLedger(_config(tmp))
+            ledger.mark_applied(DAY)
+            ledger.mark_applied(DAY)
+            self.assertEqual(ledger.status(DAY), "applied")
 
     def test_dates_are_independent(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PlanRunLedger(_config(tmp))
-            ledger.mark_applied(DAY, "h")
+            ledger.mark_applied(DAY)
             self.assertIsNone(ledger.status("2026-09-05"))
 
     def test_corrupt_entry_is_treated_as_unset_and_logged(self):
@@ -62,14 +73,12 @@ class TestLedger(unittest.TestCase):
                 captured.output,
             )
 
-    def test_status_and_plan_hash_read_from_the_matching_date_file(self):
+    def test_status_reads_from_the_matching_date_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PlanRunLedger(_config(tmp))
-            ledger.mark_applied(DAY, "hash-for-day")
-            ledger.mark_applied("2026-09-05", "hash-for-other-day")
+            ledger.mark_applied(DAY)
             self.assertEqual(ledger.status(DAY), "applied")
-            self.assertEqual(ledger.plan_hash(DAY), "hash-for-day")
-            self.assertEqual(ledger.plan_hash("2026-09-05"), "hash-for-other-day")
+            self.assertIsNone(ledger.status("2026-09-05"))
 
 
 class TestScheduleProducesOnePlanPerDay(unittest.TestCase):
@@ -94,7 +103,7 @@ class TestScheduleProducesOnePlanPerDay(unittest.TestCase):
                 if retry_eligible and tick.strftime("%H:%M") < DEADLINE:
                     outputs.append("suppressed")
                     continue
-                ledger.mark_applied(DAY, "unknown-plan")
+                ledger.mark_applied(DAY)
                 outputs.append("notified")
         self.assertEqual(outputs.count("notified"), 1)
         self.assertEqual(outputs[-1], "notified")
@@ -111,7 +120,7 @@ class TestScheduleProducesOnePlanPerDay(unittest.TestCase):
                 if retry_eligible and tick.strftime("%H:%M") < DEADLINE:
                     outputs.append("suppressed")
                     continue
-                ledger.mark_applied(DAY, "green-plan")
+                ledger.mark_applied(DAY)
                 outputs.append("notified")
         self.assertEqual(outputs.count("notified"), 1)
         self.assertEqual(outputs.index("notified"), 2)
@@ -128,10 +137,95 @@ class TestScheduleProducesOnePlanPerDay(unittest.TestCase):
                 if False and tick.strftime("%H:%M") < DEADLINE:  # retry_eligible False
                     outputs.append("suppressed")
                     continue
-                ledger.mark_applied(DAY, "unknown-plan")
+                ledger.mark_applied(DAY)
                 outputs.append("notified")
         self.assertEqual(outputs.count("notified"), 1)
         self.assertEqual(outputs.index("notified"), 0)
+
+
+class TestScheduleProducesOnePlanPerDayForReal(unittest.TestCase):
+    """Same tick sequence as above, but driving the real
+    `planning_build_day_plan` / `planning_sync_daily_plan` tools instead of a
+    hand-simulated algorithm.
+
+    `TestScheduleProducesOnePlanPerDay` above proves the *intended* tick
+    algorithm; it is a simulation -- the test body itself calls
+    `ledger.mark_applied(...)`, never `tools/planning_tools.py`. It is kept
+    because it still documents the algorithm, but it cannot catch a defect in
+    where (or whether) the real tools mark the ledger, which is exactly what
+    let four identical morning notifications through review. This class
+    drives the real tool bodies over the real tick sequence instead.
+    """
+
+    def _run_tick_sequence(self, mode: str):
+        """Drive both real tools across every cron tick.
+
+        `planning_sync_daily_plan` is only called on a tick where
+        `planning_build_day_plan` did not suppress -- there is nothing new to
+        sync otherwise, mirroring the agent's own two-step flow
+        (`default_workspace/agents/daily-planner/AGENT.md`) once step 1
+        reports "nothing to do". Readiness is pinned to a `green`,
+        non-retry-eligible signal so every tick would plan if not for the
+        ledger -- isolating the ledger as the only thing that can suppress.
+        """
+        from tests.test_planning_tools import (
+            DEFAULT_CALENDAR_ID, _GREEN_SIGNAL, _RecordingProvider, _build_env,
+        )
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode=mode, planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                provider = _RecordingProvider()
+                orig_provider = pt.get_calendar_provider
+                orig_readiness = pt._readiness
+                pt.get_calendar_provider = lambda config: provider
+
+                async def fake_readiness(context_, day):
+                    return _GREEN_SIGNAL
+
+                pt._readiness = fake_readiness
+
+                pairs = build_planning_capabilities(context.config)
+                build_tool = next(
+                    t for cap, t in pairs if cap.id == BUILD_CAPABILITY_ID
+                )
+                sync_tool = next(
+                    t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                )
+
+                suppress_flags = []
+                try:
+                    for _tick in _ticks():
+                        session.state.suppress_final_output = False
+                        await build_tool.execute(session=session, date=DAY)
+                        suppress_flags.append(session.state.suppress_final_output)
+                        if not session.state.suppress_final_output:
+                            await sync_tool.execute(session=session, date=DAY)
+                finally:
+                    pt.get_calendar_provider = orig_provider
+                    pt._readiness = orig_readiness
+
+                pending = len(PendingActionStore(context.config).list_actions())
+                return suppress_flags, pending
+
+        return asyncio.run(_inner())
+
+    def test_shadow_mode_notifies_exactly_once_across_the_morning(self):
+        suppress_flags, _pending = self._run_tick_sequence(mode="shadow")
+        self.assertEqual(len(suppress_flags), 8)
+        self.assertEqual(suppress_flags.count(False), 1,
+                         "exactly one tick must produce user-visible output")
+        self.assertEqual(suppress_flags[1:], [True] * 7,
+                         "every tick after the first must be suppressed")
+
+    def test_review_mode_files_exactly_one_pending_action_across_the_morning(self):
+        suppress_flags, pending = self._run_tick_sequence(mode="review")
+        self.assertEqual(suppress_flags.count(False), 1)
+        self.assertEqual(pending, 1)
 
 
 if __name__ == "__main__":

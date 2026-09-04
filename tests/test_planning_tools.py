@@ -673,6 +673,75 @@ class TestExecutorPayloadAndProviderErrors(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "permission_denied")
 
 
+class TestToolBodyProviderErrors(unittest.TestCase):
+    """Important 3: the tool body wraps `_compose` and its own provider calls
+    the same way the confirmed executor already does. Before this, a calendar
+    outage or a malformed `day_patterns.yaml` reaching the tool body directly
+    (not through `/confirm`) escaped as a raw exception, surfacing to the
+    model as `core/agent.py`'s generic "Error executing tool: <exception>"
+    fallback -- no stable `ToolErrorCode`, no `user_action`.
+    """
+
+    def test_calendar_outage_in_compose_is_mapped_not_raised(self):
+        from provider.external_errors import AuthMissingError
+
+        class _RaisingProvider(_RecordingProvider):
+            async def list_day(self, day, timezone, calendar_id=None):
+                raise AuthMissingError("nope")
+
+        result = _run_sync(mode="shadow", provider=_RaisingProvider())
+        payload = json.loads(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "auth_missing")
+
+    def test_apply_failure_in_auto_mode_is_mapped_not_raised(self):
+        from provider.external_errors import ProviderPermissionError
+
+        class _RaisingProvider(_RecordingProvider):
+            async def create_event(self, request, calendar_id=None):
+                raise ProviderPermissionError("nope")
+
+        result = _run_sync(mode="auto", provider=_RaisingProvider())
+        payload = json.loads(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "permission_denied")
+
+    def test_malformed_pattern_file_maps_to_invalid_args_naming_the_file(self):
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="shadow", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                # Syntactically valid YAML, but a version this build refuses
+                # to guess at -- DayPatternSet.load raises a pydantic
+                # ValidationError, not a provider exception.
+                context.config.planning.patterns_path.write_text(
+                    "version: 99\ndefaults: "
+                    "{schedulable_window: {start: '10:00', end: '11:00'}}\n"
+                )
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    result = await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig
+                return result, str(context.config.planning.patterns_path)
+
+        result, patterns_path = asyncio.run(_inner())
+        payload = json.loads(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "invalid_args")
+        self.assertIn(patterns_path, payload["error"]["message"])
+
+
 class TestLedger(unittest.TestCase):
     """Bundled minor: `PlanRunLedger.mark_applied` after an auto apply."""
 
@@ -697,15 +766,110 @@ class TestLedger(unittest.TestCase):
                 finally:
                     pt.get_calendar_provider = orig
                 ledger = PlanRunLedger(context.config)
-                return ledger.status(DATE), ledger.plan_hash(DATE)
+                return ledger.status(DATE)
 
-        status, plan_hash = asyncio.run(_inner())
+        status = asyncio.run(_inner())
         self.assertEqual(status, "applied")
-        self.assertIsNotNone(plan_hash)
+
+    def test_shadow_mode_marks_the_ledger_applied_on_its_own(self):
+        """Critical 1a: the sync tool marks the ledger in EVERY mode branch,
+        not only after a real write -- otherwise shadow mode never marks the
+        ledger anywhere and every tick re-notifies. Calls the sync tool
+        directly, without `planning_build_day_plan`, so this cannot pass by
+        riding on 1b's independent mark inside the build tool.
+        """
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="shadow", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig
+                return PlanRunLedger(context.config).status(DATE)
+
+        self.assertEqual(asyncio.run(_inner()), "applied")
+
+    def test_review_mode_marks_the_ledger_applied_on_proposal(self):
+        """Same as above for the review branch: the pending action alone
+        cannot suppress future ticks, only the ledger can.
+        """
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="review", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig
+                return PlanRunLedger(context.config).status(DATE)
+
+        self.assertEqual(asyncio.run(_inner()), "applied")
 
 
 class TestBuildDayPlan(unittest.TestCase):
     """Bundled minor: `planning_build_day_plan` had no coverage at all."""
+
+    def test_second_call_is_suppressed_even_when_sync_is_never_called(self):
+        """Critical 1b: the once-per-date guarantee cannot depend on the
+        model going on to call `planning_sync_daily_plan` at all -- if it
+        just narrates `planning_build_day_plan`'s own output and stops (as
+        the shipped agent prompt is free to do once told there's nothing to
+        sync), the ledger must already be marked by `build_day_plan` itself.
+        """
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="shadow", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig_provider = pt.get_calendar_provider
+                orig_readiness = pt._readiness
+                pt.get_calendar_provider = lambda config: provider
+
+                async def fake_readiness(context_, day):
+                    return _GREEN_SIGNAL  # retry_eligible=False: never waits
+
+                pt._readiness = fake_readiness
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == BUILD_CAPABILITY_ID
+                    )
+                    await tool_obj.execute(session=session, date=DATE)
+                    session.state.suppress_final_output = False
+                    await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig_provider
+                    pt._readiness = orig_readiness
+                return session.state.suppress_final_output
+
+        self.assertTrue(asyncio.run(_inner()))
 
     def test_already_applied_short_circuits_and_suppresses_output(self):
         async def _inner():
@@ -713,7 +877,7 @@ class TestBuildDayPlan(unittest.TestCase):
                 context, session = _build_env(
                     tmp, mode="shadow", planning_calendar_id=DEFAULT_CALENDAR_ID
                 )
-                PlanRunLedger(context.config).mark_applied(DATE, "already-hash")
+                PlanRunLedger(context.config).mark_applied(DATE)
                 pairs = build_planning_capabilities(context.config)
                 tool_obj = next(
                     t for cap, t in pairs if cap.id == BUILD_CAPABILITY_ID
@@ -793,6 +957,39 @@ class TestBuildDayPlan(unittest.TestCase):
         self.assertIn(_GREEN_SIGNAL.note, result)
         for word in ("hrv", "recovery score", "sleep_", "cycle_id", "reasons"):
             self.assertNotIn(word, result.lower())
+
+
+class TestRenderPlanAllDay(unittest.TestCase):
+    """Minor 8: an all-day mandatory event must not read as a two-day meeting."""
+
+    def test_all_day_event_renders_distinctly(self):
+        import tools.planning_tools as pt
+        from core.planning.models import DayPlan, MandatoryEvent
+
+        plan = DayPlan(
+            date=DATE, timezone="UTC", readiness=_GREEN_SIGNAL,
+            mandatory=[
+                MandatoryEvent(title="OOO", start="2026-09-04",
+                               end="2026-09-05", all_day=True),
+            ],
+        )
+        rendered = pt._render_plan(plan)
+        self.assertIn("existing: OOO (all day)", rendered)
+        self.assertNotIn("→", rendered)
+
+    def test_timed_mandatory_event_still_renders_its_span(self):
+        import tools.planning_tools as pt
+        from core.planning.models import DayPlan, MandatoryEvent
+
+        plan = DayPlan(
+            date=DATE, timezone="UTC", readiness=_GREEN_SIGNAL,
+            mandatory=[
+                MandatoryEvent(title="Standup", start="10:00", end="10:30",
+                               all_day=False),
+            ],
+        )
+        rendered = pt._render_plan(plan)
+        self.assertIn("existing: Standup (10:00 → 10:30)", rendered)
 
 
 class TestReadinessHubAbsent(unittest.TestCase):

@@ -215,6 +215,22 @@ class TestListDay(unittest.TestCase):
         self.assertEqual(kwargs["timeMin"], "2026-09-04T00:00:00+10:00")
         self.assertEqual(kwargs["timeMax"], "2026-09-05T00:00:00+10:00")
 
+    def test_list_day_window_crosses_a_dst_spring_forward_boundary(self):
+        # `_day_bounds`'s docstring claims a DST transition cannot silently
+        # widen or narrow the window because each bound's offset is computed
+        # from its own date. Every other test here uses Australia/Brisbane,
+        # which observes no DST, so none of them actually exercise that
+        # claim. America/New_York springs forward on 2027-03-14 (02:00 clocks
+        # jump to 03:00): a same-instant window would still read 23 wall-clock
+        # hours, but this window must read as a full calendar day using each
+        # boundary's own offset (-05:00 at the start of the day, -04:00 at
+        # the end).
+        provider, service = _provider([])
+        asyncio.run(provider.list_day("2027-03-14", "America/New_York"))
+        kwargs = service.events().list_kwargs
+        self.assertEqual(kwargs["timeMin"], "2027-03-14T00:00:00-05:00")
+        self.assertEqual(kwargs["timeMax"], "2027-03-15T00:00:00-04:00")
+
     def test_list_day_targets_the_requested_calendar(self):
         provider, service = _provider([])
         asyncio.run(provider.list_day("2026-09-04", "Australia/Brisbane",

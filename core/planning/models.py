@@ -116,8 +116,23 @@ class DayPatternSet(BaseModel):
         # Force both accepted shapes through validation now, so a malformed
         # Thursday fails at load rather than on a Thursday.
         for weekday in self.weekdays:
-            self.activities_for(weekday)
+            activities = self.activities_for(weekday)
             self.limits_for(weekday)
+            # Two activities that collide on slug() collide on slot_key too
+            # (`pattern:{weekday}:{slug}`), and sync.py's diff() is
+            # last-write-wins on slot_key -- one of the two would silently
+            # never reach the calendar. Reject at load rather than mutate the
+            # slug to disambiguate, which would break idempotency across a
+            # file reorder.
+            seen: dict[str, str] = {}
+            for activity in activities:
+                slug = activity.slug()
+                if slug in seen:
+                    raise ValueError(
+                        f"{weekday}: '{seen[slug]}' and '{activity.name}' both "
+                        f"produce the slug '{slug}'; rename one of them"
+                    )
+                seen[slug] = activity.name
         return self
 
     def _entry(self, weekday: str) -> Any:

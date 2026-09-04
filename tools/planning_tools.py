@@ -12,6 +12,8 @@ import logging
 import uuid
 from typing import TYPE_CHECKING
 
+from pydantic import ValidationError
+
 from core.pending_actions import PendingActionStore
 from core.planning.engine import build_day_plan, project_readiness
 from core.planning.models import DayPatternSet
@@ -94,6 +96,23 @@ def _read_calendar_id(config: "Config") -> str:
     return config.external_tools.calendar.calendar_id or "primary"
 
 
+def _config_or_provider_error(exc: Exception, config: "Config") -> ToolResult:
+    """Map a malformed ``day_patterns.yaml`` or a provider failure alike.
+
+    Checked in this order because a pattern-loading failure is a config
+    problem (``invalid_args`` naming the file), never a provider outage --
+    `provider_exception_to_result` has no branch for it and would otherwise
+    mislabel it `provider_error`.
+    """
+    if isinstance(exc, (ValidationError, OSError)):
+        return ToolResult.error(
+            ToolErrorCode.INVALID_ARGS,
+            f"{config.planning.patterns_path} is malformed: {exc}",
+            user_action="Fix the day patterns file before syncing.",
+        )
+    return provider_exception_to_result(exc)
+
+
 async def _compose(session: "AgentSession", day: str) -> "DayPlan":
     """Gather every input and hand them to the pure engine.
 
@@ -171,7 +190,8 @@ def _render_plan(plan: "DayPlan") -> str:
     for item in plan.unscheduled:
         lines.append(f"not scheduled: {item.title} ({item.reason})")
     for event in plan.mandatory:
-        lines.append(f"existing: {event.title} ({event.start} → {event.end})")
+        when = "all day" if event.all_day else f"{event.start} → {event.end}"
+        lines.append(f"existing: {event.title} ({when})")
     return "\n".join(lines)
 
 
@@ -241,7 +261,8 @@ def build_planning_capabilities(config: "Config") -> list[tuple[CapabilityDef, B
         },
     )
     async def planning_build_day_plan(date: str, session: "AgentSession") -> str:
-        ledger = PlanRunLedger(session.shared_context.config)
+        config = session.shared_context.config
+        ledger = PlanRunLedger(config)
         if ledger.status(date) == "applied":
             # Already planned today. Stay silent rather than notifying again.
             session.state.suppress_final_output = True
@@ -249,11 +270,12 @@ def build_planning_capabilities(config: "Config") -> list[tuple[CapabilityDef, B
                 f"{date} was already planned; nothing to do."
             ).to_tool_content()
 
-        plan = await _compose(session, date)
+        try:
+            plan = await _compose(session, date)
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return _config_or_provider_error(e, config).to_tool_content()
 
-        if plan.readiness.retry_eligible and _before_deadline(
-            session.shared_context.config
-        ):
+        if plan.readiness.retry_eligible and _before_deadline(config):
             # WHOOP has not opened today's cycle. This is the ordinary answer
             # at 05:00, not a fault; wait for the next tick without notifying.
             session.state.suppress_final_output = True
@@ -262,6 +284,11 @@ def build_planning_capabilities(config: "Config") -> list[tuple[CapabilityDef, B
                 "waiting for the next tick."
             ).to_tool_content()
 
+        # This is the deterministic point at which the day is considered
+        # planned, in every mode including shadow: the once-per-date
+        # guarantee cannot depend on the model going on to call
+        # `planning_sync_daily_plan` (it may just narrate this and stop).
+        ledger.mark_applied(date)
         return ToolResult.success(_render_plan(plan)).to_tool_content()
 
     @tool(
@@ -281,13 +308,17 @@ def build_planning_capabilities(config: "Config") -> list[tuple[CapabilityDef, B
     async def planning_sync_daily_plan(date: str, session: "AgentSession") -> str:
         config = session.shared_context.config
         planning = config.planning
-        plan = await _compose(session, date)          # builds the DayPlan
+        try:
+            plan = await _compose(session, date)          # builds the DayPlan
 
-        provider = get_calendar_provider(config)
-        existing = await provider.list_day(
-            date, config.timezone or "UTC",
-            calendar_id=planning.planning_calendar_id,
-        )
+            provider = get_calendar_provider(config)
+            existing = await provider.list_day(
+                date, config.timezone or "UTC",
+                calendar_id=planning.planning_calendar_id,
+            )
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return _config_or_provider_error(e, config).to_tool_content()
+
         sync = diff(plan.events, existing, plan_date=date)
 
         try:
@@ -303,6 +334,15 @@ def build_planning_capabilities(config: "Config") -> list[tuple[CapabilityDef, B
                 ToolErrorCode.INVALID_ARGS, str(e),
                 user_action="Fix planning configuration before syncing.",
             ).to_tool_content()
+        except (ValidationError, OSError) as e:
+            return _config_or_provider_error(e, config).to_tool_content()
+
+        # Mark the ledger on every non-suppressed path, not only the write
+        # path -- `shadow` and `review` never reach the old auto-only call
+        # site below, which is exactly what let four identical morning
+        # notifications through. `mark_applied` is idempotent, so this
+        # overlapping with `planning_build_day_plan`'s own mark is harmless.
+        PlanRunLedger(config).mark_applied(date)
 
         if planning.mode == "shadow":
             return ToolResult.success(
@@ -326,8 +366,10 @@ def build_planning_capabilities(config: "Config") -> list[tuple[CapabilityDef, B
                 action_id=action_id, capability_id=SYNC_CAPABILITY_ID,
                 summary=summary, payload=payload).to_tool_content()
 
-        applied = await _apply(provider, sync, date, planning.planning_calendar_id)
-        PlanRunLedger(config).mark_applied(date, plan.plan_hash)
+        try:
+            applied = await _apply(provider, sync, date, planning.planning_calendar_id)
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return provider_exception_to_result(e).to_tool_content()
         return ToolResult.success(applied).to_tool_content()
 
     return [
@@ -377,7 +419,12 @@ def build_planning_confirmed_executors(config: "Config") -> dict[str, ConfirmedE
                 "Stored plan action is missing a date or plan_hash.",
             ).to_tool_content()
 
-        plan = await _compose(session, date)
+        config = session.shared_context.config
+        try:
+            plan = await _compose(session, date)
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return _config_or_provider_error(e, config).to_tool_content()
+
         if plan.plan_hash != expected:
             return ToolResult.error(
                 ToolErrorCode.INVALID_ARGS,
@@ -385,7 +432,6 @@ def build_planning_confirmed_executors(config: "Config") -> dict[str, ConfirmedE
                 "re-run the planner instead of applying a stale plan.",
             ).to_tool_content()
 
-        config = session.shared_context.config
         provider = get_calendar_provider(config)
         try:
             existing = await provider.list_day(
@@ -413,6 +459,8 @@ def build_planning_confirmed_executors(config: "Config") -> dict[str, ConfirmedE
             return ToolResult.error(
                 ToolErrorCode.INVALID_ARGS, str(e)
             ).to_tool_content()
+        except (ValidationError, OSError) as e:
+            return _config_or_provider_error(e, config).to_tool_content()
 
         try:
             applied = await _apply(
@@ -420,7 +468,7 @@ def build_planning_confirmed_executors(config: "Config") -> dict[str, ConfirmedE
             )
         except Exception as e:  # noqa: BLE001 - mapped to stable error codes
             return provider_exception_to_result(e).to_tool_content()
-        PlanRunLedger(config).mark_applied(date, plan.plan_hash)
+        PlanRunLedger(config).mark_applied(date)
         return ToolResult.success(applied).to_tool_content()
 
     return {SYNC_CAPABILITY_ID: sync_confirmed}

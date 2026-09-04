@@ -264,11 +264,18 @@ class TestGuards(unittest.TestCase):
             _guard(_day_plan([]), planning_calendar_id="work@example.com",
                    read_calendar_id="work@example.com")
 
-    def test_resolved_primary_is_compared_when_read_calendar_is_unset(self):
-        # provider_cfg.calendar_id may be None, which resolves to "primary".
-        with self.assertRaisesRegex(GuardError, "primary"):
-            _guard(_day_plan([]), planning_calendar_id="primary",
-                   read_calendar_id="primary")
+    def test_planning_calendar_matches_an_explicit_non_primary_read_calendar(self):
+        # Guard 3 (planning calendar == read calendar) can only ever fire
+        # when the two are equal -- and when the read calendar is left
+        # *unset*, `_read_calendar_id` always resolves it to "primary", which
+        # guard 2 (planning_calendar_id == "primary") refuses first. So guard
+        # 3 only does real work when `external_tools.calendar.calendar_id` is
+        # an explicit non-primary value that happens to collide with
+        # planning_calendar_id -- exercise that case directly rather than the
+        # unreachable "both resolve to primary" one.
+        with self.assertRaisesRegex(GuardError, "same calendar"):
+            _guard(_day_plan([]), planning_calendar_id="team@example.com",
+                   read_calendar_id="team@example.com")
 
     def test_event_on_another_date_is_refused(self):
         stray = PlannedEvent(

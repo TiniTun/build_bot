@@ -247,16 +247,13 @@ class PlanRunLedger:
         """The recorded status for ``day``, or ``None`` if never planned."""
         return self._read(day).get("status")
 
-    def plan_hash(self, day: str) -> str | None:
-        """The hash of the plan last applied for ``day``, if any."""
-        return self._read(day).get("plan_hash")
+    def mark_applied(self, day: str) -> None:
+        """Durably record that ``day`` has been planned.
 
-    def mark_applied(self, day: str, plan_hash: str) -> None:
-        """Durably record that ``day`` has been planned."""
+        Idempotent: calling this twice for the same date is harmless -- the
+        second write just overwrites the record with the same status.
+        """
         self._dir.mkdir(parents=True, exist_ok=True)
         self._path(day).write_text(
-            json.dumps(
-                {"date": day, "status": "applied", "plan_hash": plan_hash},
-                sort_keys=True,
-            )
+            json.dumps({"date": day, "status": "applied"}, sort_keys=True)
         )

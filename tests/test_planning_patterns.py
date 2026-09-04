@@ -119,6 +119,42 @@ class TestPatternLoading(unittest.TestCase):
         with self.assertRaises(ValueError):
             _load(GOOD.replace("weekdays:\n  mon:", "weekdays:\n  someday: []\n  mon:"))
 
+    def test_two_activities_colliding_on_slug_are_rejected(self):
+        # slug() strips punctuation, so "Walk" and "walk!" both produce
+        # slot_key "pattern:mon:walk" -- diff()'s `wanted` dict (keyed on
+        # slot_key) is last-write-wins, so without this check the second
+        # planned event would silently overwrite the first and one block
+        # would never reach the calendar. Reject at load, name both.
+        colliding = GOOD.replace(
+            "    - name: Walk\n",
+            "    - name: Walk\n"
+            "      duration_minutes: 15\n"
+            "      priority: medium\n"
+            "      flexibility: flexible\n"
+            "      energy: low\n"
+            "      category: recovery\n"
+            "    - name: walk!\n",
+        )
+        with self.assertRaisesRegex(ValueError, "Walk.*walk!|walk!.*Walk"):
+            _load(colliding)
+
+    def test_slug_collision_on_a_different_weekday_does_not_affect_others(self):
+        # The uniqueness check is per-weekday: the same activity name may
+        # legitimately repeat across different days of the week.
+        patterns = _load(GOOD.replace(
+            "  sat:\n    schedulable_window: {start: \"09:00\", end: \"11:00\"}\n"
+            "    activities:\n"
+            "      - {name: Long run, duration_minutes: 90, priority: high,\n"
+            "         energy: high, category: personal}\n",
+            "  sat:\n    schedulable_window: {start: \"09:00\", end: \"11:00\"}\n"
+            "    activities:\n"
+            "      - {name: Walk, duration_minutes: 90, priority: high,\n"
+            "         energy: high, category: personal}\n",
+        ))
+        self.assertEqual(
+            [a.name for a in patterns.activities_for("sat")], ["Walk"]
+        )
+
     def test_shipped_workspace_pattern_file_is_valid(self):
         # The file we ship must load; a broken default is a broken feature.
         DayPatternSet.load(
