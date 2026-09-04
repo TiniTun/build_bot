@@ -23,10 +23,13 @@ from provider.tasks import get_task_provider
 from tools.base import BaseTool, ToolErrorCode, ToolResult, tool
 from tools.capabilities import CapabilityDef, ToolRiskLevel
 from tools.confirmed_executors import ConfirmedExecutor
+from tools.external_support import provider_exception_to_result
 
 if TYPE_CHECKING:
     from core.agent import AgentSession
-    from core.planning.models import DayPlan
+    from core.context import SharedContext
+    from core.planning.models import DayPlan, PatternLimits, ReadinessSignal
+    from provider.calendar.base import CalendarProvider
     from utils.config import Config
 
 logger = logging.getLogger(__name__)
@@ -39,7 +42,7 @@ STATUS_TOOL = "whoop_status"
 _WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
-async def _readiness(context, day: str):
+async def _readiness(context: "SharedContext", day: str) -> "ReadinessSignal":
     """Fetch and project readiness. Never raises; degrades to `unknown`."""
     hub = getattr(context, "mcp_hub", None)
     if hub is None:
@@ -70,7 +73,7 @@ async def _readiness(context, day: str):
     return signal
 
 
-def _limits_for(config, day: str):
+def _limits_for(config: "Config", day: str) -> "PatternLimits":
     """The pattern limits governing this weekday, with its overrides applied."""
     from datetime import date as _date
 
@@ -79,7 +82,19 @@ def _limits_for(config, day: str):
     return patterns.limits_for(weekday)
 
 
-async def _compose(session, day: str) -> "DayPlan":
+def _read_calendar_id(config: "Config") -> str:
+    """The already-resolved read calendar id, never `None`.
+
+    `check_guards` compares this against `planning_calendar_id` verbatim and
+    deliberately does not resolve it itself; an unresolved `None` would make
+    that guard blind to the read calendar actually being the default
+    "primary". Both the tool body and the confirmed executor call this same
+    helper so the resolution can never drift between the two paths.
+    """
+    return config.external_tools.calendar.calendar_id or "primary"
+
+
+async def _compose(session: "AgentSession", day: str) -> "DayPlan":
     """Gather every input and hand them to the pure engine.
 
     The only place a DayPlan is built. The sync tool and the confirmed
@@ -160,7 +175,9 @@ def _render_plan(plan: "DayPlan") -> str:
     return "\n".join(lines)
 
 
-async def _apply(provider, sync: SyncPlan, date: str, calendar_id: str) -> str:
+async def _apply(
+    provider: "CalendarProvider", sync: SyncPlan, date: str, calendar_id: str
+) -> str:
     """Apply a diff. Attendees are always empty; markers are always stamped."""
     for action in sync.creates:
         await provider.create_event(
@@ -191,7 +208,7 @@ async def _apply(provider, sync: SyncPlan, date: str, calendar_id: str) -> str:
     )
 
 
-def _before_deadline(config) -> bool:
+def _before_deadline(config: "Config") -> bool:
     """True while the morning window is still open.
 
     Compared in the configured timezone — the same clock CronWorker ticks on,
@@ -273,12 +290,11 @@ def build_planning_capabilities(config: "Config") -> list[tuple[CapabilityDef, B
         )
         sync = diff(plan.events, existing, plan_date=date)
 
-        read_calendar_id = config.external_tools.calendar.calendar_id or "primary"
         try:
             check_guards(
                 plan, sync,
                 planning_calendar_id=planning.planning_calendar_id,
-                read_calendar_id=read_calendar_id,
+                read_calendar_id=_read_calendar_id(config),
                 limits=_limits_for(config, date),
                 max_events_per_day=planning.max_events_per_day,
             )
@@ -340,7 +356,7 @@ def build_planning_confirmed_executors(config: "Config") -> dict[str, ConfirmedE
     if config.planning is None or not config.planning.enabled:
         return {}
 
-    async def sync_confirmed(session, payload: dict) -> str:
+    async def sync_confirmed(session: "AgentSession", payload: dict) -> str:
         planning = session.shared_context.config.planning
         if planning.mode == "shadow":
             # `/confirm` reaches here directly, bypassing the tool body, so the
@@ -349,8 +365,18 @@ def build_planning_confirmed_executors(config: "Config") -> dict[str, ConfirmedE
                 ToolErrorCode.PERMISSION_DENIED,
                 "planning.mode is 'shadow'; refusing to write.",
             ).to_tool_content()
-        date = payload.get("date")
-        expected = payload.get("plan_hash")
+
+        date, expected = payload.get("date"), payload.get("plan_hash")
+        if not isinstance(date, str) or not isinstance(expected, str):
+            # `/confirm` (core/commands/handlers.py) deletes the pending
+            # action and calls this executor directly, with no try/except and
+            # no ToolRegistry in between -- an unguarded `date=None` would
+            # raise inside `_compose` after the action is already gone.
+            return ToolResult.error(
+                ToolErrorCode.INVALID_ARGS,
+                "Stored plan action is missing a date or plan_hash.",
+            ).to_tool_content()
+
         plan = await _compose(session, date)
         if plan.plan_hash != expected:
             return ToolResult.error(
@@ -361,19 +387,25 @@ def build_planning_confirmed_executors(config: "Config") -> dict[str, ConfirmedE
 
         config = session.shared_context.config
         provider = get_calendar_provider(config)
-        existing = await provider.list_day(
-            date, config.timezone or "UTC",
-            calendar_id=planning.planning_calendar_id,
-        )
+        try:
+            existing = await provider.list_day(
+                date, config.timezone or "UTC",
+                calendar_id=planning.planning_calendar_id,
+            )
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return provider_exception_to_result(e).to_tool_content()
+
         sync = diff(plan.events, existing, plan_date=date)
         try:
             # Guards run again here: /confirm reaches this executor directly,
-            # so it cannot inherit the tool body's checks.
+            # so it cannot inherit the tool body's checks. The plan hash only
+            # covers `plan.events`; planning_calendar_id and
+            # max_events_per_day can both change between propose and confirm
+            # without changing the hash, so this re-run is load-bearing.
             check_guards(
                 plan, sync,
                 planning_calendar_id=planning.planning_calendar_id,
-                read_calendar_id=config.external_tools.calendar.calendar_id
-                or "primary",
+                read_calendar_id=_read_calendar_id(config),
                 limits=_limits_for(config, date),
                 max_events_per_day=planning.max_events_per_day,
             )
@@ -382,9 +414,12 @@ def build_planning_confirmed_executors(config: "Config") -> dict[str, ConfirmedE
                 ToolErrorCode.INVALID_ARGS, str(e)
             ).to_tool_content()
 
-        applied = await _apply(
-            provider, sync, date, planning.planning_calendar_id
-        )
+        try:
+            applied = await _apply(
+                provider, sync, date, planning.planning_calendar_id
+            )
+        except Exception as e:  # noqa: BLE001 - mapped to stable error codes
+            return provider_exception_to_result(e).to_tool_content()
         PlanRunLedger(config).mark_applied(date, plan.plan_hash)
         return ToolResult.success(applied).to_tool_content()
 

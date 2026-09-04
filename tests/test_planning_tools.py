@@ -10,20 +10,44 @@ from types import SimpleNamespace
 import yaml
 
 from core.pending_actions import PendingActionStore
-from core.planning.sync import OWNER
+from core.planning.models import ReadinessSignal
+from core.planning.sync import OWNER, PlanRunLedger
 from tests.helpers import make_context, make_workspace
+from tools.capabilities import (
+    DEFAULT_RISK_ACTIONS,
+    CapabilityRegistry,
+    ConfirmationRequiredTool,
+    ToolPolicy,
+    ToolRiskLevel,
+)
 from tools.planning_tools import (
     SYNC_CAPABILITY_ID,
     build_planning_capabilities,
     build_planning_confirmed_executors,
 )
 
-DATE = "2026-02-02"
+DATE = "2026-02-02"  # a Monday
 DEFAULT_CALENDAR_ID = "plan@group.calendar.google.com"
+BUILD_CAPABILITY_ID = "planning.build_day_plan"
 
-# Every weekday admits the same single, low-stakes activity, so the plan is
-# identical regardless of which weekday DATE happens to fall on.
-_ACTIVITY = {"name": "Deep Work", "duration_minutes": 30}
+# A signal shaped like a real WHOOP response: not retry-eligible, so a plan
+# built from it renders instead of suppressing, and carrying real "leaky"
+# words (whoop/readiness) so the never-leaks tests exercise a genuine risk
+# instead of trivially passing against the default `unknown` verdict.
+_GREEN_SIGNAL = ReadinessSignal(
+    verdict="green", source="whoop", retry_eligible=False,
+    note="WHOOP reports full readiness.",
+)
+
+# Two low-stakes activities admitted under every verdict, repeated for every
+# weekday so the plan is identical regardless of which weekday DATE falls on.
+# Two events (not one) so a batch-vs-per-event pending action, and a
+# `for request, _ in provider.created` loop that only ran once, both have
+# something to catch.
+_ACTIVITIES = [
+    {"name": "Deep Work", "duration_minutes": 30},
+    {"name": "Walk", "duration_minutes": 30},
+]
 _PATTERNS_YAML = yaml.safe_dump(
     {
         "version": 1,
@@ -35,7 +59,7 @@ _PATTERNS_YAML = yaml.safe_dump(
             "min_block_minutes": 20,
         },
         "weekdays": {
-            day: [_ACTIVITY]
+            day: _ACTIVITIES
             for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
         },
     }
@@ -60,7 +84,9 @@ class _RecordingProvider:
                              start=request.start, end=request.end)
 
     async def update_event(self, event_id, request, calendar_id=None):
-        self.patched.append((event_id, calendar_id))
+        # Full request kept (not just id/calendar_id): the patch branch needs
+        # the same attendees/marker/no-leak assertions the create branch gets.
+        self.patched.append((event_id, request, calendar_id))
         from provider.calendar.base import CalendarEvent
         return CalendarEvent(id=event_id, title=request.title,
                              start=request.start, end=request.end)
@@ -228,17 +254,63 @@ class TestModes(unittest.TestCase):
         self.assertEqual(provider.mutations, 0)
 
 
+def _event_blob(request) -> str:
+    """Everything on a create/update request an operator might read back."""
+    return " ".join(filter(None, [
+        request.title,
+        request.description,
+        request.location,
+        json.dumps(request.private_properties, sort_keys=True),
+    ])).lower()
+
+
 class TestReadinessNeverLeaks(unittest.TestCase):
-    """Criterion 4, closing the read-back loop."""
+    """Criterion 4, closing the read-back loop.
+
+    Forces a real, non-`unknown` verdict via `_readiness` so the leak check
+    exercises actual risk -- the default `unknown`/`unavailable` verdict never
+    says a leaky word on its own, so a test against it would pass even with a
+    verdict wired straight into `description` or `location`.
+    """
 
     def test_no_event_body_mentions_readiness(self):
         provider = _RecordingProvider()
-        _run_sync(mode="auto", provider=provider)
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="auto", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig_provider = pt.get_calendar_provider
+                orig_readiness = pt._readiness
+                pt.get_calendar_provider = lambda config: provider
+
+                async def fake_readiness(context_, day):
+                    return _GREEN_SIGNAL
+
+                pt._readiness = fake_readiness
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig_provider
+                    pt._readiness = orig_readiness
+
+        asyncio.run(_inner())
+        self.assertGreater(len(provider.created), 0)
         for request, _ in provider.created:
-            blob = f"{request.title} {request.description or ''}"
+            blob = _event_blob(request)
             for word in ("green", "yellow", "red", "recovery score", "hrv",
                          "readiness", "whoop"):
-                self.assertNotIn(word, blob.lower())
+                self.assertNotIn(word, blob)
+            # The plan's own signal, verbatim -- not a guessed word list.
+            self.assertNotIn(_GREEN_SIGNAL.verdict, blob)
+            self.assertNotIn(_GREEN_SIGNAL.note.lower(), blob)
 
 
 class TestConfirmedExecutor(unittest.TestCase):
@@ -343,6 +415,412 @@ class TestConfirmedExecutor(unittest.TestCase):
         self.assertEqual(provider.mutations, 0)
 
 
+class TestRiskLevel(unittest.TestCase):
+    """Important 2: the static WRITE risk level is the whole mode-safety story.
+
+    A `confirm_required` capability is wrapped in `ConfirmationRequiredTool`,
+    which never runs the wrapped tool body -- so shadow mode's gate (which
+    lives inside that body) would never even be reached; the wrapper would
+    record a pending action whose confirmation writes unconditionally.
+    """
+
+    def test_sync_capability_is_static_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            context, _session = _build_env(
+                tmp, mode="auto", planning_calendar_id=DEFAULT_CALENDAR_ID
+            )
+            cap = next(
+                c for c, _ in build_planning_capabilities(context.config)
+                if c.id == SYNC_CAPABILITY_ID
+            )
+            self.assertIs(cap.risk_level, ToolRiskLevel.WRITE)
+
+    def test_sync_tool_is_not_confirmation_wrapped_under_a_configured_policy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            context, _session = _build_env(
+                tmp, mode="auto", planning_calendar_id=DEFAULT_CALENDAR_ID
+            )
+            registry = CapabilityRegistry()
+            for cap, tool_obj in build_planning_capabilities(context.config):
+                registry.register(cap, tool_obj)
+            # A non-permissive policy: enabled_capabilities is not None, so
+            # `ToolPolicy.resolve` actually consults risk_actions instead of
+            # short-circuiting to ALLOW.
+            policy = ToolPolicy(
+                enabled_capabilities={SYNC_CAPABILITY_ID},
+                risk_actions=dict(DEFAULT_RISK_ACTIONS),
+            )
+            built = registry.build_tool_registry(policy)
+            tool_obj = built.get("planning_sync_daily_plan")
+            self.assertIsNotNone(tool_obj)
+            self.assertNotIsInstance(tool_obj, ConfirmationRequiredTool)
+
+
+class TestApplyPatchAndDelete(unittest.TestCase):
+    """Important 4: `_apply`'s patch and delete branches, exercised for real.
+
+    Seeds the planning calendar with an owned event at a different time for
+    `pattern:mon:deep-work` (forces a patch) and an owned event for a slot
+    key no longer wanted (forces a delete), then re-runs the attendees /
+    marker / no-leak checks over the patch branch specifically.
+    """
+
+    def test_patch_and_delete_branches(self):
+        from provider.calendar.base import CalendarEvent
+        from core.planning.sync import marker
+
+        provider = _RecordingProvider()
+        # A different start/end than what `_compose` will place -- forces a
+        # patch instead of "unchanged".
+        provider._plan = [
+            CalendarEvent(
+                id="existing-deep-work",
+                title="Deep Work",
+                start="2026-02-02T05:00:00+00:00",
+                end="2026-02-02T05:30:00+00:00",
+                private_properties=marker(DATE, "pattern:mon:deep-work"),
+            ),
+            CalendarEvent(
+                id="stale-1",
+                title="Old Activity",
+                start="2026-02-02T04:00:00+00:00",
+                end="2026-02-02T04:15:00+00:00",
+                private_properties=marker(DATE, "pattern:mon:stale-thing"),
+            ),
+        ]
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="auto", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig_provider = pt.get_calendar_provider
+                orig_readiness = pt._readiness
+                pt.get_calendar_provider = lambda config: provider
+
+                async def fake_readiness(context_, day):
+                    return _GREEN_SIGNAL
+
+                pt._readiness = fake_readiness
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig_provider
+                    pt._readiness = orig_readiness
+
+        asyncio.run(_inner())
+
+        self.assertEqual(len(provider.patched), 1)
+        _event_id, request, calendar_id = provider.patched[0]
+        self.assertEqual(calendar_id, DEFAULT_CALENDAR_ID)
+        self.assertEqual(request.attendees, [])
+        self.assertEqual(request.private_properties["owner"], OWNER)
+        self.assertEqual(request.private_properties["slot_key"], "pattern:mon:deep-work")
+        blob = _event_blob(request)
+        for word in ("green", "yellow", "red", "recovery score", "hrv",
+                     "readiness", "whoop"):
+            self.assertNotIn(word, blob)
+
+        self.assertGreater(len(provider.deleted), 0)
+        deleted_ids = {event_id for event_id, _cal in provider.deleted}
+        self.assertIn("stale-1", deleted_ids)
+
+
+class TestExecutorReRunsGuards(unittest.TestCase):
+    """Important 5: the executor's own `check_guards` re-run is load-bearing.
+
+    `plan_hash` only covers `plan.events`; `max_events_per_day` and
+    `planning_calendar_id` can both change between propose and confirm
+    without changing the hash. Only re-running the guards catches that.
+    """
+
+    def test_max_events_per_day_shrunk_after_propose_is_still_enforced(self):
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="review", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    raw = await tool_obj.execute(session=session, date=DATE)
+                    payload = json.loads(raw)["action"]["payload"]
+
+                    # Configuration tightened between propose and confirm.
+                    # plan_hash is unaffected (it only covers plan.events).
+                    context.config.planning.max_events_per_day = 0
+                    executors = build_planning_confirmed_executors(context.config)
+                    executor = executors[SYNC_CAPABILITY_ID]
+                    result = await executor(session, payload)
+                finally:
+                    pt.get_calendar_provider = orig
+                return result
+
+        result = asyncio.run(_inner())
+        payload = json.loads(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(provider.mutations, 0)
+
+
+class TestExecutorPayloadAndProviderErrors(unittest.TestCase):
+    """Important 6: `/confirm` calls the executor directly (core/commands/
+    handlers.py), deleting the pending action first and with no try/except in
+    between. A malformed payload or a provider failure must come back as a
+    mapped `ToolResult.error`, never an escaping exception.
+    """
+
+    def test_malformed_payload_is_rejected_not_raised(self):
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="review", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    executors = build_planning_confirmed_executors(context.config)
+                    executor = executors[SYNC_CAPABILITY_ID]
+                    result = await executor(session, {"date": None, "plan_hash": None})
+                finally:
+                    pt.get_calendar_provider = orig
+                return result
+
+        result = asyncio.run(_inner())
+        payload = json.loads(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "invalid_args")
+        self.assertEqual(provider.mutations, 0)
+
+    def test_missing_payload_keys_are_rejected_not_raised(self):
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="review", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    executors = build_planning_confirmed_executors(context.config)
+                    executor = executors[SYNC_CAPABILITY_ID]
+                    result = await executor(session, {})
+                finally:
+                    pt.get_calendar_provider = orig
+                return result
+
+        result = asyncio.run(_inner())
+        payload = json.loads(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "invalid_args")
+
+    def test_provider_failure_during_apply_is_mapped_not_raised(self):
+        from provider.external_errors import ProviderPermissionError
+
+        class _RaisingProvider(_RecordingProvider):
+            async def create_event(self, request, calendar_id=None):
+                raise ProviderPermissionError("nope")
+
+        provider = _RaisingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="review", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    raw = await tool_obj.execute(session=session, date=DATE)
+                    payload = json.loads(raw)["action"]["payload"]
+
+                    executors = build_planning_confirmed_executors(context.config)
+                    executor = executors[SYNC_CAPABILITY_ID]
+                    result = await executor(session, payload)
+                finally:
+                    pt.get_calendar_provider = orig
+                return result
+
+        result = asyncio.run(_inner())
+        payload = json.loads(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], "permission_denied")
+
+
+class TestLedger(unittest.TestCase):
+    """Bundled minor: `PlanRunLedger.mark_applied` after an auto apply."""
+
+    def test_auto_mode_marks_the_ledger_applied(self):
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="auto", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig
+                ledger = PlanRunLedger(context.config)
+                return ledger.status(DATE), ledger.plan_hash(DATE)
+
+        status, plan_hash = asyncio.run(_inner())
+        self.assertEqual(status, "applied")
+        self.assertIsNotNone(plan_hash)
+
+
+class TestBuildDayPlan(unittest.TestCase):
+    """Bundled minor: `planning_build_day_plan` had no coverage at all."""
+
+    def test_already_applied_short_circuits_and_suppresses_output(self):
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="shadow", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                PlanRunLedger(context.config).mark_applied(DATE, "already-hash")
+                pairs = build_planning_capabilities(context.config)
+                tool_obj = next(
+                    t for cap, t in pairs if cap.id == BUILD_CAPABILITY_ID
+                )
+                result = await tool_obj.execute(session=session, date=DATE)
+                return result, session.state.suppress_final_output
+
+        result, suppressed = asyncio.run(_inner())
+        self.assertIn("already planned", result.lower())
+        self.assertTrue(suppressed)
+
+    def test_retry_eligible_before_deadline_suppresses_output(self):
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="shadow", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig_provider = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                # No health_planner server is configured, so `_readiness`
+                # already degrades to retry_eligible=True on its own; pin
+                # `_before_deadline` deterministically instead of depending
+                # on the real wall clock relative to plan_deadline.
+                orig_deadline = pt._before_deadline
+                pt._before_deadline = lambda config: True
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == BUILD_CAPABILITY_ID
+                    )
+                    result = await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig_provider
+                    pt._before_deadline = orig_deadline
+                return result, session.state.suppress_final_output
+
+        result, suppressed = asyncio.run(_inner())
+        self.assertIn("waiting for the next tick", result.lower())
+        self.assertTrue(suppressed)
+
+    def test_render_plan_carries_only_the_verdict_and_note(self):
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="shadow", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig_provider = pt.get_calendar_provider
+                orig_readiness = pt._readiness
+                pt.get_calendar_provider = lambda config: provider
+
+                async def fake_readiness(context_, day):
+                    return _GREEN_SIGNAL
+
+                pt._readiness = fake_readiness
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == BUILD_CAPABILITY_ID
+                    )
+                    result = await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig_provider
+                    pt._readiness = orig_readiness
+                return result, session.state.suppress_final_output
+
+        result, suppressed = asyncio.run(_inner())
+        self.assertFalse(suppressed)
+        self.assertIn(_GREEN_SIGNAL.verdict, result)
+        self.assertIn(_GREEN_SIGNAL.note, result)
+        for word in ("hrv", "recovery score", "sleep_", "cycle_id", "reasons"):
+            self.assertNotIn(word, result.lower())
+
+
+class TestReadinessHubAbsent(unittest.TestCase):
+    """Bundled minor: `session.shared_context.mcp_hub = None` still composes."""
+
+    def test_plan_still_composes_with_no_hub(self):
+        provider = _RecordingProvider()
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="shadow", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                session.shared_context.mcp_hub = None
+                import tools.planning_tools as pt
+
+                orig = pt.get_calendar_provider
+                pt.get_calendar_provider = lambda config: provider
+                try:
+                    plan = await pt._compose(session, DATE)
+                finally:
+                    pt.get_calendar_provider = orig
+                return plan
+
+        plan = asyncio.run(_inner())
+        self.assertEqual(plan.readiness.verdict, "unknown")
+
+
 class TestReadCalendarIdResolution(unittest.TestCase):
     """Criterion 5: the module resolves `calendar_id or "primary"` itself;
 
@@ -376,6 +854,48 @@ class TestReadCalendarIdResolution(unittest.TestCase):
                         t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
                     )
                     await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig_provider
+                    pt.check_guards = orig_guard
+
+        asyncio.run(_inner())
+        self.assertEqual(seen, ["primary"])
+
+    def test_executor_path_also_resolves_none_to_primary(self):
+        """The tool body and the executor share `_read_calendar_id`; pin both."""
+        provider = _RecordingProvider()
+        seen = []
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="review", planning_calendar_id=DEFAULT_CALENDAR_ID
+                )
+                import tools.planning_tools as pt
+
+                orig_provider = pt.get_calendar_provider
+                orig_guard = pt.check_guards
+                pt.get_calendar_provider = lambda config: provider
+
+                def spy(*args, **kwargs):
+                    seen.append(kwargs.get("read_calendar_id"))
+                    return orig_guard(*args, **kwargs)
+
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(
+                        t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID
+                    )
+                    raw = await tool_obj.execute(session=session, date=DATE)
+                    payload = json.loads(raw)["action"]["payload"]
+
+                    # Only spy from here on: the propose call above already
+                    # used one legitimate "primary" resolution.
+                    seen.clear()
+                    pt.check_guards = spy
+                    executors = build_planning_confirmed_executors(context.config)
+                    executor = executors[SYNC_CAPABILITY_ID]
+                    await executor(session, payload)
                 finally:
                     pt.get_calendar_provider = orig_provider
                     pt.check_guards = orig_guard
