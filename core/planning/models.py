@@ -135,3 +135,24 @@ class DayPatternSet(BaseModel):
     def load(cls, path: Path) -> "DayPatternSet":
         """Load and fully validate a pattern file."""
         return cls.model_validate(yaml.safe_load(path.read_text()) or {})
+
+
+ReadinessVerdict = Literal["green", "yellow", "red", "unknown"]
+ReadinessSource = Literal[
+    "whoop", "no_cycle_yet", "unavailable", "unauthorised", "date_mismatch"
+]
+
+
+class ReadinessSignal(BaseModel):
+    """Everything the planner is allowed to know about the user's readiness.
+
+    This is the whole allowlist. `note` is written by build_bot from
+    (verdict, source) — never copied from the server, whose `reasons` embed
+    recovery scores and sleep durations in prose.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    verdict: ReadinessVerdict
+    source: ReadinessSource
+    retry_eligible: bool
+    note: str
