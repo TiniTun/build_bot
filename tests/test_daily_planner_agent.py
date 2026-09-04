@@ -21,7 +21,7 @@ from pathlib import Path
 import yaml
 
 from provider.mcp.hub import McpHub
-from tests.helpers import make_context, make_workspace
+from tests.helpers import make_context, make_workspace, write_definition
 from tests.mcp_fakes import FakeMcpClient, fake_tool
 from tools.capabilities import ToolPolicy
 from tools.capability_catalog import build_capability_registry
@@ -99,12 +99,16 @@ class TestDailyPlannerAssembledRegistry(unittest.IsolatedAsyncioTestCase):
     ``get_tool_schemas()`` against. Here we assemble that registry the same
     way ``core/agent.py::Agent._build_tools`` does —
     ``build_capability_registry(...)`` then
-    ``CapabilityRegistry.build_tool_registry(ToolPolicy.from_config(...))`` —
-    with a ``health_planner`` MCP server configured ``expose_to_agents:
-    False``, and confirm no ``mcp_health_planner_*`` tool name survives into
-    it. This is the daily-planner's own subject matter (an assembled
-    toolset), so the guarantee belongs in this file even though it is a
-    workspace-wide invariant, not specific to this one agent.
+    ``CapabilityRegistry.build_tool_registry(ToolPolicy.from_config(...))``.
+
+    Note what the first test below does *not* prove: the daily-planner's
+    ``allowed_capabilities`` never contains ``mcp.health_planner.*`` under any
+    configuration, so its assembled registry excludes that tool regardless of
+    whether ``expose_to_agents`` does anything at all — the assertion cannot
+    tell a working fail-closed gate from an inert one. That proof needs an
+    agent whose allowlist *does* request the capability; see
+    ``TestMcpExposureGateIsolated`` below, which is where the gate is actually
+    exercised in both directions.
     """
 
     async def _build_registry(self, tmp_path: str):
@@ -157,7 +161,18 @@ class TestDailyPlannerAssembledRegistry(unittest.IsolatedAsyncioTestCase):
         finally:
             await context.mcp_hub.stop()
 
-    async def test_host_only_mcp_tool_never_reaches_the_assembled_registry(self):
+    async def test_daily_planner_registry_excludes_the_mcp_tool_it_never_requested(self):
+        """Weaker than it sounds: true regardless of `expose_to_agents`.
+
+        This only shows the *daily-planner's* assembled registry has no
+        health_planner tool — which follows from its allowlist never
+        containing that capability id (already covered by
+        ``test_never_grants_raw_whoop_access`` and
+        ``test_no_workspace_agent_grants_health_planner_mcp``). It is kept as
+        a useful "the assembled toolset matches the declared allowlist"
+        statement, not as proof the `expose_to_agents` gate does anything —
+        for that, see ``TestMcpExposureGateIsolated``.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             registry = await self._build_registry(tmp)
         names = {schema["function"]["name"] for schema in registry.get_tool_schemas()}
@@ -181,6 +196,89 @@ class TestDailyPlannerAssembledRegistry(unittest.IsolatedAsyncioTestCase):
                 "planning_sync_daily_plan",
             },
         )
+
+
+class TestMcpExposureGateIsolated(unittest.IsolatedAsyncioTestCase):
+    """Proves `expose_to_agents` is load-bearing, not merely inert.
+
+    Neither test in ``TestDailyPlannerAssembledRegistry`` can distinguish "the
+    fail-closed bridge worked" from "this agent never asked for it": the
+    daily-planner's allowlist never contains
+    ``mcp.health_planner.get_daily_readiness``, so its assembled registry
+    excludes that tool either way. Here a synthetic, test-only agent's
+    ``allowed_capabilities`` *does* request it, so ``expose_to_agents`` is the
+    only variable left between the two assertions below — one proving the
+    tool is absent when the flag is off, the other (the one that actually
+    matters) proving it is present when the flag is on, so the first result
+    cannot be explained by something else entirely (a typo'd capability id, a
+    broken fake, ToolPolicy narrowing unrelated to the flag).
+    """
+
+    AGENT_ID = "mcp-probe"
+    MCP_TOOL_NAME = "mcp_health_planner_get_daily_readiness"
+
+    async def _build_registry(self, tmp_path: str, *, expose_to_agents: bool):
+        workspace = make_workspace(Path(tmp_path))
+
+        # A synthetic agent, present only in this isolated workspace, whose
+        # sole purpose is to hold the capability the daily-planner never
+        # requests — isolating the bridge gate from allowlist narrowing.
+        write_definition(
+            workspace / "agents",
+            self.AGENT_ID,
+            "AGENT.md",
+            {
+                "name": "MCP Probe",
+                "description": "Test-only agent granted the health_planner MCP capability.",
+                "allow_skills": False,
+                "allowed_capabilities": ["mcp.health_planner.get_daily_readiness"],
+            },
+            "Test-only agent used to isolate the expose_to_agents gate.",
+        )
+
+        context = make_context(workspace)
+        client = FakeMcpClient(
+            "health_planner",
+            tools=(fake_tool("health_planner", "get_daily_readiness"),),
+        )
+        health_planner_config = McpServerConfig(
+            url="http://127.0.0.1:8767/mcp",
+            allowed_tools=["get_daily_readiness"],
+            expose_to_agents=expose_to_agents,
+        )
+        context.config.mcp = McpConfig(servers={"health_planner": health_planner_config})
+        context.mcp_hub = McpHub(context.config, client_factory=lambda sid, cfg: client)
+        await context.mcp_hub.start()
+        try:
+            agent_def = context.agent_loader.load(self.AGENT_ID)
+            capabilities = build_capability_registry(
+                agent_def, context, include_post_message=False
+            )
+            policy = ToolPolicy.from_config(
+                context.config, agent_def.allowed_capabilities
+            )
+            return capabilities.build_tool_registry(policy)
+        finally:
+            await context.mcp_hub.stop()
+
+    async def test_gate_closed_hides_the_tool_even_from_an_allowlisted_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = await self._build_registry(tmp, expose_to_agents=False)
+        names = {schema["function"]["name"] for schema in registry.get_tool_schemas()}
+        self.assertNotIn(self.MCP_TOOL_NAME, names)
+
+    async def test_gate_open_lets_an_allowlisted_agent_see_the_tool(self):
+        """The half that actually proves the gate is load-bearing.
+
+        Flipping only `expose_to_agents` (agent allowlist held constant) makes
+        the tool appear, so its absence above is the gate working — not a
+        capability id typo, a fake misconfiguration, or unrelated policy
+        narrowing.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = await self._build_registry(tmp, expose_to_agents=True)
+        names = {schema["function"]["name"] for schema in registry.get_tool_schemas()}
+        self.assertIn(self.MCP_TOOL_NAME, names)
 
 
 if __name__ == "__main__":
