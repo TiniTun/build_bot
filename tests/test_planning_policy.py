@@ -2,7 +2,12 @@
 
 import unittest
 
-from core.planning.engine import budget_minutes, select_candidates, task_priority
+from core.planning.engine import (
+    _POLICIES,
+    budget_minutes,
+    select_candidates,
+    task_priority,
+)
 from core.planning.models import (
     DayPattern, PatternLimits, ReadinessSignal, TimeWindow,
 )
@@ -68,6 +73,20 @@ class TestVerdictPolicy(unittest.TestCase):
         got = select_candidates([DEEP_WORK, WALK, ADMIN], [], _signal("unknown"),
                                 LIMITS, weekday="mon", overdue_ids=set())
         self.assertEqual(_names(got), ["Walk"])
+
+    def test_red_priority_floor_is_deliberately_non_binding(self):
+        # Red's gate is recovery-or-essential, NOT the priority floor. A tighter
+        # floor here would drop a medium-priority recovery walk — the one thing a
+        # red day most wants to keep. _admits short-circuits before reading this,
+        # so a wrong value is otherwise invisible.
+        self.assertEqual(_POLICIES["red"].min_priority, "low")
+
+    def test_red_keeps_a_medium_priority_recovery_activity(self):
+        got = select_candidates([WALK], [], _signal("red"), LIMITS,
+                                weekday="mon", overdue_ids=set())
+        self.assertEqual([c.title for c in got], ["Walk"])
+        self.assertEqual(WALK.priority, "medium")   # below any tightened floor
+        self.assertEqual(WALK.category, "recovery")
 
 
 class TestTaskPriorityMapping(unittest.TestCase):
