@@ -186,3 +186,45 @@ class ReadinessSignal(BaseModel):
     source: ReadinessSource
     retry_eligible: bool
     note: str
+
+
+class PlannedEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    slot_key: str
+    title: str
+    start: datetime
+    end: datetime
+    duration_assumed: bool = False
+
+
+class UnscheduledItem(BaseModel):
+    """Something the verdict or the dials refused, with the reason why.
+
+    Nothing is ever dropped silently; every refusal is reportable.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    slot_key: str
+    title: str
+    reason: str
+
+
+class MandatoryEvent(BaseModel):
+    """An existing event, carried into the plan for narration only."""
+
+    model_config = ConfigDict(extra="forbid")
+    title: str
+    start: str
+    end: str
+    all_day: bool = False
+
+
+class DayPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    date: str
+    timezone: str
+    readiness: ReadinessSignal
+    events: list[PlannedEvent] = Field(default_factory=list)
+    unscheduled: list[UnscheduledItem] = Field(default_factory=list)
+    mandatory: list[MandatoryEvent] = Field(default_factory=list)
+    plan_hash: str = ""

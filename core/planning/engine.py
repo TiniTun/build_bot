@@ -5,6 +5,7 @@ what makes every acceptance criterion testable without a network, a calendar,
 or an LLM.
 """
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -16,12 +17,16 @@ from core.planning.models import (
     PRIORITY_RANK,
     Candidate,
     DayPattern,
+    DayPlan,
     Interval,
+    MandatoryEvent,
     PatternLimits,
+    PlannedEvent,
     Priority,
     ReadinessSignal,
     ReadinessSource,
     TimeWindow,
+    UnscheduledItem,
 )
 
 if TYPE_CHECKING:
@@ -292,3 +297,169 @@ def select_candidates(
         )
 
     return candidates
+
+
+# Why a candidate was refused. Stable strings: they reach the user's summary
+# and the tests assert on them.
+REASON_ENERGY = "energy_above_yellow"
+REASON_NOT_RECOVERY = "not_recovery_on_red"
+REASON_PRIORITY = "priority_below_policy"
+REASON_MIN_FREE = "min_free_minutes"
+REASON_BUDGET = "max_scheduled_minutes"
+REASON_MIN_BLOCK = "below_min_block_minutes"
+REASON_NO_ROOM = "no_free_interval_fits"
+REASON_FIXED = "fixed_time_unavailable"
+
+
+def _refusal_reason(policy: "_VerdictPolicy", priority: str, energy: str,
+                    category: str) -> str:
+    """Which rule refused this candidate — for the user-visible summary."""
+    if policy.recovery_or_essential_only:
+        return REASON_NOT_RECOVERY
+    if ENERGY_RANK[energy] > ENERGY_RANK[policy.max_energy]:
+        return REASON_ENERGY
+    return REASON_PRIORITY
+
+
+def _place(interval_list: list[Interval], start: datetime, end: datetime) -> None:
+    """Remove [start, end) from the free list, splitting the interval it lands in."""
+    for index, interval in enumerate(interval_list):
+        if interval.start <= start and end <= interval.end:
+            replacement = []
+            if interval.start < start:
+                replacement.append(Interval(start=interval.start, end=start))
+            if end < interval.end:
+                replacement.append(Interval(start=end, end=interval.end))
+            interval_list[index : index + 1] = replacement
+            return
+
+
+def build_day_plan(
+    *,
+    day: str,
+    timezone: str,
+    agenda: list[Any],
+    tasks: list[Any],
+    patterns: list[DayPattern],
+    limits: PatternLimits,
+    signal: Any,
+    weekday: str,
+    overdue_ids: set[str],
+) -> DayPlan:
+    """Compose one day's plan deterministically.
+
+    Fixed-time activities are placed first (they cannot move), then everything
+    else greedily into the earliest interval that fits. Three ceilings apply in
+    order: `min_block_minutes` per block, the verdict's minute budget, and
+    `min_free_minutes` of the window that must remain unscheduled.
+    """
+    policy = _POLICIES[signal.verdict]
+    window = limits.schedulable_window
+    intervals = free_intervals(agenda, window, limits.buffer_minutes, day, timezone)
+    total_free = sum(i.minutes for i in intervals)
+
+    # The window must keep `min_free_minutes` unscheduled, and the verdict caps
+    # placed work. Whichever binds first is the real budget.
+    budget = min(
+        budget_minutes(signal.verdict, limits),
+        max(total_free - limits.min_free_minutes, 0),
+    )
+
+    admitted = select_candidates(
+        patterns, tasks, signal, limits, weekday=weekday, overdue_ids=overdue_ids
+    )
+    admitted_keys = {c.slot_key for c in admitted}
+
+    events: list[PlannedEvent] = []
+    unscheduled: list[UnscheduledItem] = []
+
+    # Everything the policy refused, reported with the rule that refused it.
+    for index, activity in enumerate(patterns):
+        key = f"pattern:{weekday}:{activity.slug()}"
+        if key not in admitted_keys:
+            unscheduled.append(UnscheduledItem(
+                slot_key=key, title=activity.name,
+                reason=_refusal_reason(policy, activity.priority, activity.energy,
+                                       activity.category),
+            ))
+    for task in tasks:
+        key = f"task:{task.id}"
+        if key not in admitted_keys:
+            priority = task_priority(task, overdue=task.id in overdue_ids)
+            unscheduled.append(UnscheduledItem(
+                slot_key=key, title=task.content,
+                reason=_refusal_reason(policy, priority, "medium", "work"),
+            ))
+
+    spent = 0
+    # Fixed-time first: they cannot move, so they claim their slot before any
+    # flexible block can take it.
+    for candidate in sorted(admitted, key=lambda c: (c.fixed_time is None, c.order)):
+        if candidate.duration_minutes < limits.min_block_minutes:
+            unscheduled.append(UnscheduledItem(
+                slot_key=candidate.slot_key, title=candidate.title,
+                reason=REASON_MIN_BLOCK))
+            continue
+        if spent + candidate.duration_minutes > budget:
+            unscheduled.append(UnscheduledItem(
+                slot_key=candidate.slot_key, title=candidate.title,
+                reason=REASON_MIN_FREE if total_free - spent
+                - candidate.duration_minutes < limits.min_free_minutes
+                else REASON_BUDGET))
+            continue
+
+        duration = timedelta(minutes=candidate.duration_minutes)
+        placed: tuple[datetime, datetime] | None = None
+
+        if candidate.fixed_time is not None:
+            start = _at(day, candidate.fixed_time, timezone)
+            end = start + duration
+            if any(i.start <= start and end <= i.end for i in intervals):
+                placed = (start, end)
+            else:
+                # `flexibility: fixed` forbids moving it; refusing is correct.
+                unscheduled.append(UnscheduledItem(
+                    slot_key=candidate.slot_key, title=candidate.title,
+                    reason=REASON_FIXED))
+                continue
+        else:
+            bounds = candidate.window
+            for interval in intervals:
+                start = interval.start
+                if bounds is not None:
+                    start = max(start, _at(day, bounds.start, timezone))
+                end = start + duration
+                if end <= interval.end and (
+                    bounds is None or end <= _at(day, bounds.end, timezone)
+                ):
+                    placed = (start, end)
+                    break
+            if placed is None:
+                unscheduled.append(UnscheduledItem(
+                    slot_key=candidate.slot_key, title=candidate.title,
+                    reason=REASON_NO_ROOM))
+                continue
+
+        start, end = placed
+        events.append(PlannedEvent(
+            slot_key=candidate.slot_key, title=candidate.title,
+            start=start, end=end, duration_assumed=candidate.duration_assumed))
+        _place(intervals, start, end)
+        spent += candidate.duration_minutes
+
+    digest = hashlib.sha256(
+        "|".join(
+            f"{e.slot_key}@{e.start.isoformat()}-{e.end.isoformat()}"
+            for e in sorted(events, key=lambda e: e.slot_key)
+        ).encode()
+    ).hexdigest()[:16]
+
+    return DayPlan(
+        date=day, timezone=timezone, readiness=signal,
+        events=events, unscheduled=unscheduled,
+        mandatory=[
+            MandatoryEvent(title=e.title, start=e.start, end=e.end, all_day=e.all_day)
+            for e in agenda
+        ],
+        plan_hash=digest,
+    )
