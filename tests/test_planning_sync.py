@@ -177,20 +177,38 @@ class TestMutationCoverage(unittest.TestCase):
         self.assertEqual([a.slot_key for a in plan.creates], ["pattern:mon:walk"])
         self.assertEqual(plan.refused_foreign, ["foreign1"])
 
-    def test_owned_event_without_slot_key_is_ignored_not_matched_to_everything(self):
+    def test_owned_event_without_slot_key_is_deleted_and_logged(self):
         # Mutation 6 target: a marker missing slot_key must not be treated as
-        # matching every desired slot -- it should simply be excluded from the
-        # ours-by-slot_key map (and thus neither patched nor left unchanged).
+        # matching every desired slot. It is provably ours (owner + plan_date
+        # match) and provably unmatchable, which is exactly the condition
+        # "owned + not desired -> delete" covers -- so it must be routed to
+        # plan.deletes with a signal, never silently dropped.
         desired = [_planned("pattern:mon:walk", "Walk", "12:00", "12:30")]
         broken = CalendarEvent(
             id="broken1", title="Walk",
             start=f"{DAY}T12:00:00+10:00", end=f"{DAY}T12:30:00+10:00",
             private_properties={"owner": OWNER, "plan_date": DAY},
         )
-        plan = diff(desired, [broken], plan_date=DAY)
+        with self.assertLogs("core.planning.sync", level="WARNING") as logs:
+            plan = diff(desired, [broken], plan_date=DAY)
         self.assertEqual(plan.unchanged, [])
         self.assertEqual([a.slot_key for a in plan.creates], ["pattern:mon:walk"])
         self.assertEqual(plan.patches, [])
+        self.assertEqual([a.event_id for a in plan.deletes], ["broken1"])
+        self.assertTrue(any("broken1" in message for message in logs.output))
+
+    def test_foreign_event_without_slot_key_is_refused_not_deleted(self):
+        # Pins that the new delete-on-missing-slot_key path can only be
+        # reached by something already proven ours -- a foreign event with no
+        # slot_key at all must still land in refused_foreign, never deletes.
+        foreign = CalendarEvent(
+            id="foreign2", title="Someone else's thing",
+            start=f"{DAY}T12:00:00+10:00", end=f"{DAY}T12:30:00+10:00",
+            private_properties={},
+        )
+        plan = diff([], [foreign], plan_date=DAY)
+        self.assertEqual(plan.deletes, [])
+        self.assertEqual(plan.refused_foreign, ["foreign2"])
 
 
 if __name__ == "__main__":

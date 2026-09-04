@@ -4,6 +4,7 @@ Pure diffing plus the guards. The provider calls live in a later task;
 nothing here performs I/O.
 """
 
+import logging
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
@@ -12,6 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field
 if TYPE_CHECKING:
     from core.planning.models import PlannedEvent
     from provider.calendar.base import CalendarEvent
+
+logger = logging.getLogger(__name__)
 
 # Stamped into extendedProperties.private on every event we create. An event
 # without it is someone else's and is never modified or deleted.
@@ -81,10 +84,12 @@ def diff(
     """Compare wanted blocks against what is already on the planning calendar.
 
     Keyed on (plan_date, slot_key), which is stable across runs. Only events
-    carrying our owner marker for *this* date, with a slot_key present, are
-    candidates for patch or delete; everything else (foreign events, and our
-    own events from other dates) is left untouched. Foreign events are also
-    reported in ``refused_foreign``.
+    carrying our owner marker for *this* date are candidates for patch or
+    delete; everything else (foreign events, and our own events from other
+    dates) is left untouched. Foreign events are reported in
+    ``refused_foreign``. An owned, correctly-dated event whose marker is
+    missing ``slot_key`` cannot be matched to any desired slot -- it is
+    unconditionally deleted (logged) rather than left orphaned.
     """
     plan = SyncPlan()
 
@@ -99,8 +104,24 @@ def diff(
             continue
         slot_key = event.private_properties.get("slot_key")
         if not slot_key:
-            # A marker missing slot_key cannot be matched to any desired
-            # slot safely; skip rather than treat it as a universal match.
+            # Provably ours (owner + plan_date matched) and provably
+            # unmatchable against any desired slot: exactly the condition
+            # "owned + not desired -> delete" exists to cover. Skipping
+            # would orphan it forever and create a duplicate beside it every
+            # run, with no signal anywhere -- so it goes through the normal
+            # delete path with a synthetic identifier, logged loudly.
+            logger.warning(
+                "planning sync: owned event %r for plan_date %r has a "
+                "marker missing slot_key (private_properties=%r); routing "
+                "to delete instead of leaving it orphaned",
+                event.id,
+                plan_date,
+                event.private_properties,
+            )
+            plan.deletes.append(SyncAction(
+                op="delete",
+                slot_key=f"(malformed marker: id={event.id})",
+                title=event.title, event_id=event.id))
             continue
         ours[slot_key] = event
 
