@@ -22,6 +22,17 @@ class TestEventMapping(unittest.TestCase):
         self.assertFalse(event.all_day)
         self.assertEqual(event.start, "2026-09-04T10:00:00+10:00")
 
+    def test_empty_start_when_neither_date_nor_datetime(self):
+        """Regression test: handles missing date/dateTime without crashing."""
+        event = _event_from_item({
+            "id": "e1b",
+            "summary": "Malformed event",
+            "start": {},
+            "end": {},
+        })
+        self.assertFalse(event.all_day)
+        self.assertEqual(event.start, "")
+
     def test_date_only_event_is_all_day(self):
         event = _event_from_item({
             "id": "e2",
@@ -58,6 +69,23 @@ class TestEventMapping(unittest.TestCase):
         })
         self.assertTrue(event.transparent)
 
+    def test_opaque_event_is_not_transparent(self):
+        event = _event_from_item({
+            "id": "e5b", "summary": "Meeting",
+            "start": {"dateTime": "2026-09-04T10:00:00+10:00"},
+            "end": {"dateTime": "2026-09-04T12:00:00+10:00"},
+            "transparency": "opaque",
+        })
+        self.assertFalse(event.transparent)
+
+    def test_missing_transparency_is_not_transparent(self):
+        event = _event_from_item({
+            "id": "e5c", "summary": "Meeting",
+            "start": {"dateTime": "2026-09-04T10:00:00+10:00"},
+            "end": {"dateTime": "2026-09-04T12:00:00+10:00"},
+        })
+        self.assertFalse(event.transparent)
+
     def test_self_declined_event_is_flagged(self):
         event = _event_from_item({
             "id": "e6", "summary": "Optional sync",
@@ -67,6 +95,28 @@ class TestEventMapping(unittest.TestCase):
                            "responseStatus": "declined"}],
         })
         self.assertTrue(event.self_declined)
+
+    def test_other_attendee_declined_is_not_self_declined(self):
+        """Attendee with responseStatus declined but not self=True."""
+        event = _event_from_item({
+            "id": "e7", "summary": "Team sync",
+            "start": {"dateTime": "2026-09-04T10:00:00+10:00"},
+            "end": {"dateTime": "2026-09-04T11:00:00+10:00"},
+            "attendees": [{"email": "other@example.com", "self": False,
+                           "responseStatus": "declined"}],
+        })
+        self.assertFalse(event.self_declined)
+
+    def test_self_with_accepted_response_is_not_declined(self):
+        """Attendee with self=True but accepted responseStatus."""
+        event = _event_from_item({
+            "id": "e8", "summary": "Team sync",
+            "start": {"dateTime": "2026-09-04T10:00:00+10:00"},
+            "end": {"dateTime": "2026-09-04T11:00:00+10:00"},
+            "attendees": [{"email": "me@example.com", "self": True,
+                           "responseStatus": "accepted"}],
+        })
+        self.assertFalse(event.self_declined)
 
     def test_body_writes_private_properties(self):
         body = _event_body(
