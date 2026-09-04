@@ -289,7 +289,8 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def resolve_paths(self) -> "Config":
         """Resolve relative paths to absolute using workspace."""
-        self.workspace = self.workspace.resolve()     
+        if not self.workspace.is_absolute():
+            self.workspace = self.workspace.resolve()     
 
         for field_name in (
             "agents_path",
