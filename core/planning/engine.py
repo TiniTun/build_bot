@@ -5,6 +5,7 @@ what makes every acceptance criterion testable without a network, a calendar,
 or an LLM.
 """
 
+import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, Mapping
 from zoneinfo import ZoneInfo
@@ -13,6 +14,8 @@ from core.planning.models import Interval, ReadinessSignal, ReadinessSource, Tim
 
 if TYPE_CHECKING:
     from provider.mcp.models import McpCallResult
+
+logger = logging.getLogger(__name__)
 
 # health_planner stamps this into `_meta` on the ordinary "you are not awake
 # yet" answer. Pinned by tests/test_planning_readiness.py.
@@ -109,8 +112,18 @@ def _busy_spans(events: list[Any], timezone: str) -> list[tuple[datetime, dateti
             start = datetime.fromisoformat(event.start)
             end = datetime.fromisoformat(event.end)
         except ValueError:
-            # An unparseable event is reported elsewhere but cannot be treated
-            # as free time; skipping it silently would over-schedule the day.
+            # We cannot mark this busy: a busy span needs a start and end,
+            # and those are precisely what failed to parse. Skipping is the
+            # only option, so the consequence is that this stretch of time
+            # is treated as free — the warning is what makes that visible
+            # instead of a silent over-schedule.
+            logger.warning(
+                "planning: skipping event %r with unparseable start/end "
+                "(start=%r, end=%r)",
+                event.id,
+                event.start,
+                event.end,
+            )
             continue
         spans.append((start.astimezone(zone), end.astimezone(zone)))
     return spans

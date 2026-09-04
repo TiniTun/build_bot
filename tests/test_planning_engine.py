@@ -84,6 +84,18 @@ class TestFreeIntervals(unittest.TestCase):
         got = free_intervals(events, WINDOW, 0, DAY, TZ)
         self.assertEqual(_hhmm(got), [("10:00", "11:00"), ("12:30", "14:45")])
 
+    def test_unparseable_event_is_skipped_and_logged(self):
+        # We cannot mark it busy (its span is precisely what failed to
+        # parse), so it is dropped and the window comes back fully free.
+        # That is a real gap in safety if it happened silently, so pin the
+        # warning as a tested property, not just a claim in a comment.
+        events = [CalendarEvent(id="bad", title="broken",
+                                start="not-a-date", end="also-not-a-date")]
+        with self.assertLogs("core.planning.engine", level="WARNING") as logs:
+            got = free_intervals(events, WINDOW, 10, DAY, TZ)
+        self.assertEqual(_hhmm(got), [("10:00", "14:45")])
+        self.assertTrue(any("bad" in message for message in logs.output))
+
     def test_meeting_covering_the_window_leaves_nothing(self):
         self.assertEqual(free_intervals([_event("09:00", "15:00")], WINDOW, 10, DAY, TZ), [])
 
