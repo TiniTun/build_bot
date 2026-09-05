@@ -75,6 +75,11 @@ class SessionState:
     messages: list[Message]
     source: "EventSource"
     shared_context: "SharedContext"
+    # Set by a tool that has concluded there is nothing to report. AgentWorker
+    # skips publishing the final message for such a session. A tool cannot
+    # otherwise stay silent: the worker publishes the model's own text, and a
+    # model asked to say nothing will still say something.
+    suppress_final_output: bool = False
 
     def add_message(self, message: Message) -> None:
         """Add message to conversation history."""

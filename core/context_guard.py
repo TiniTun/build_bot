@@ -139,6 +139,12 @@ class ContextGuard:
         for message in compacted_history:
             new_session.state.add_message(message)
 
+        # A tool earlier in the run may have already decided this session has
+        # nothing to report. `new_session` starts a fresh SessionState with
+        # the field defaulted to False, so carry it over explicitly or a
+        # mid-tick compaction would silently un-silence the run.
+        new_session.state.suppress_final_output = state.suppress_final_output
+
         return new_session.state
 
     async def _build_compacted_messages(

@@ -275,6 +275,14 @@ def build_mcp_capabilities(
         server_config = hub.server_config(server_id)
         if server_config is None or not server_config.enabled:
             continue
+        if not server_config.expose_to_agents:
+            # Reachable by the hub (the engine still calls it host-side via
+            # ``hub.call_tool``), but no agent may ever reach it. Skipped here,
+            # before any capability/tool pair is built, rather than in
+            # ToolPolicy, so it stays fail-closed even in permissive legacy
+            # mode (no `tools:` block) — the same reasoning the allowlist
+            # filter in ``_build_pair`` already follows.
+            continue
         for tool in snapshot.tools:
             pair = _build_pair(server_id, server_config, tool, taken)
             if pair is not None:

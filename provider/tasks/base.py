@@ -9,6 +9,7 @@ enabled with ``provider == "todoist"``; otherwise it returns a
 the confirmed-execution path; the proposal tools never call them directly.
 """
 
+import re
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -17,6 +18,31 @@ from provider.external_errors import AuthMissingError
 
 if TYPE_CHECKING:
     from utils.config import Config
+
+# A duration label is the WHOLE label, never a substring: `sprint-30max` is a
+# project name, not half an hour. Minutes must be positive; `0m` is a typo, not
+# a zero-length task.
+_DURATION_LABEL = re.compile(r"^(?P<value>\d+(?:\.\d+)?)(?P<unit>m|h)$", re.IGNORECASE)
+
+
+def parse_duration_label(labels: list[str]) -> int | None:
+    """Return the estimated minutes named by the first duration-shaped label.
+
+    Recognizes `15m`/`30m`/`60m`/`90m` and the `1h`/`1.5h` forms. Labels are
+    scanned in the order Todoist returned them, so the first match wins and the
+    result is stable across runs. Returns None when no label names a duration;
+    the caller supplies the configured fallback and marks it assumed.
+    """
+    for label in labels:
+        match = _DURATION_LABEL.match(label.strip())
+        if match is None:
+            continue
+        value = float(match.group("value"))
+        minutes = int(round(value * 60)) if match.group("unit").lower() == "h" else int(round(value))
+        if minutes > 0:
+            return minutes
+    return None
+
 
 BulkOperation = Literal["update", "complete", "delete"]
 
@@ -35,6 +61,10 @@ class Task(BaseModel):
     due_date: str | None = None
     is_completed: bool = False
     url: str | None = None
+    estimated_minutes: int | None = None
+    # True when `estimated_minutes` came from configuration rather than a label,
+    # so the planner can mark the block as an assumption in its summary.
+    duration_assumed: bool = False
 
 
 class TaskUpdateRequest(BaseModel):

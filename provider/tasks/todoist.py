@@ -27,6 +27,7 @@ from provider.tasks.base import (
     BulkTaskUpdateRequest,
     Task,
     TaskUpdateRequest,
+    parse_duration_label,
 )
 
 if TYPE_CHECKING:
@@ -49,9 +50,11 @@ def _map_status_error(exc: httpx.HTTPStatusError) -> Exception:
     return exc
 
 
-def _to_task(data: dict[str, Any]) -> Task:
+def _to_task(data: dict[str, Any], default_minutes: int) -> Task:
     """Map a Todoist REST task object to the domain ``Task`` model."""
     due = data.get("due") or {}
+    labels = list(data.get("labels", []) or [])
+    labelled = parse_duration_label(labels)
     return Task(
         id=str(data.get("id", "")),
         content=data.get("content", ""),
@@ -59,11 +62,13 @@ def _to_task(data: dict[str, Any]) -> Task:
         project_id=_opt_str(data.get("project_id")),
         section_id=_opt_str(data.get("section_id")),
         priority=int(data.get("priority", 1) or 1),
-        labels=list(data.get("labels", []) or []),
+        labels=labels,
         due_string=due.get("string"),
         due_date=due.get("date"),
         is_completed=bool(data.get("is_completed", False)),
         url=data.get("url"),
+        estimated_minutes=labelled if labelled is not None else default_minutes,
+        duration_assumed=labelled is None,
     )
 
 
@@ -115,7 +120,7 @@ class TodoistTaskProvider:
             "GET", f"{REST_BASE}/tasks", params={"filter": filter}
         )
         items = response.json() or []
-        return [_to_task(item) for item in items[:limit]]
+        return [_to_task(item, self._provider_cfg.default_duration_minutes) for item in items[:limit]]
 
     async def quick_add(self, text: str) -> Task:
         response = await self._request(
@@ -123,7 +128,7 @@ class TodoistTaskProvider:
         )
         data = response.json() or {}
         if isinstance(data, dict) and data:
-            return _to_task(data)
+            return _to_task(data, self._provider_cfg.default_duration_minutes)
         return Task(id="", content=text)
 
     async def list_inbox(self, limit: int) -> list[Task]:
@@ -144,7 +149,7 @@ class TodoistTaskProvider:
             f"{REST_BASE}/tasks/{request.task_id}",
             json=request.changed_fields(),
         )
-        return _to_task(response.json())
+        return _to_task(response.json(), self._provider_cfg.default_duration_minutes)
 
     async def complete(self, task_id: str) -> None:
         await self._request("POST", f"{REST_BASE}/tasks/{task_id}/close")

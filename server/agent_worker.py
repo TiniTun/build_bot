@@ -108,7 +108,18 @@ class AgentWorker(SubscriberWorker):
                 response = await session.chat(event.content)
                 logger.info(f"Session completed: {session_id}")
 
-                await self._emit_response(event, content=response, agent_id=agent_def.id)
+                if session.state.suppress_final_output:
+                    # A tool decided this run has nothing to report — a planner
+                    # tick still waiting for WHOOP, or one whose plan is already
+                    # applied. Without this the model's text would be published
+                    # and the user notified once per tick.
+                    logger.debug(
+                        "Session %s suppressed its final output", session_id
+                    )
+                else:
+                    await self._emit_response(
+                        event, content=response, agent_id=agent_def.id
+                    )
 
                 if self._should_auto_extract(event, agent_def):
                     asyncio.create_task(
