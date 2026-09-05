@@ -10,6 +10,13 @@ llm:
   api_base: null                # Optional custom endpoint (http:// or https://)
   temperature: 0.7
   max_tokens: 2048
+  # api_mode: chat_completions  # Default; keeps existing provider behavior
+  # For GPT-5.6 with reasoning and tools, set:
+  # model: gpt-5.6-sol
+  # api_mode: responses
+  # reasoning_effort: medium
+  # store: true                # Required for persisted Responses continuation
+  # max_tokens: 8192           # Includes reasoning and visible output
   # extra: {}                   # Optional provider-specific params passed to LiteLLM
   # Local LLM request tracing. Writes one redacted JSONL record per request to
   # <logging_path>/llm-traces/YYYY-MM-DD.jsonl so you can inspect model calls
@@ -20,6 +27,7 @@ llm:
 
   # --- Anthropic Opus through LiteLLM (alternative) ---
   # provider: anthropic
+  # api_mode: chat_completions # Explicitly override a global Responses mode
   # model: anthropic/claude-opus-4.8   # LiteLLM Anthropic model format
   # api_key: sk-ant-your-anthropic-api-key-here
   # temperature: 0.7

@@ -6,12 +6,13 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from pydantic import BaseModel, Field, field_validator
 
-from litellm.types.completion import ChatCompletionMessageParam as Message
+from provider.llm.models import Message
 
 from core.events import EventSource
 
 if TYPE_CHECKING:
     from utils.config import Config
+
 
 def _now_iso() -> str:
     """Return current datetime as ISO format string."""
@@ -28,6 +29,12 @@ class HistorySession(BaseModel):
     message_count: int = 0
     created_at: str
     update_at: str
+    last_response_id: str | None = None
+    last_response_model: str | None = None
+    last_api_mode: str | None = None
+    response_endpoint_fingerprint: str | None = None
+    response_message_count: int = 0
+    response_prefix_hash: str | None = None
 
     @field_validator("source", mode="before")
     @classmethod
@@ -56,11 +63,7 @@ class HistoryMessage(BaseModel):
         tool_calls = None
         if message.get("tool_calls"):
             tool_calls = [
-                {
-                    "id": tc.get("id"),
-                    "type": tc.get("type", "function"),
-                    "function": tc.get("function", {})
-                }
+                {"id": tc.get("id"), "type": tc.get("type", "function"), "function": tc.get("function", {})}
                 for tc in message["tool_calls"]
             ]
 
@@ -70,7 +73,7 @@ class HistoryMessage(BaseModel):
             role=message["role"],
             content=str(message.get("content", "")),
             tool_calls=tool_calls,
-            tool_call_id=tool_call_id
+            tool_call_id=tool_call_id,
         )
 
     def to_message(self) -> Message:
@@ -100,7 +103,7 @@ class HistoryStore:
     @staticmethod
     def from_config(config: "Config") -> "HistoryStore":
         return HistoryStore(config.history_path)
-    
+
     def __init__(self, base_path: Path):
         self.base_path = Path(base_path)
         self.sessions_path = self.base_path / "sessions"
@@ -117,7 +120,7 @@ class HistoryStore:
         """Read all session entries from index.jsonl."""
         if not self.index_path.exists():
             return []
-        
+
         sessions = []
         with open(self.index_path) as f:
             for line in f:
@@ -128,27 +131,28 @@ class HistoryStore:
                     except Exception:
                         continue
         return sessions
-    
+
     def _write_index(self, sessions: list[HistorySession]) -> None:
         """Write all session entries to index.jsonl."""
         with open(self.index_path, "w") as f:
             for session in sessions:
                 f.write(session.model_dump_json() + "\n")
 
-    def _find_session_index(
-        self, sessions: list[HistorySession], session_id: str
-    ) -> int:
+    def _find_session_index(self, sessions: list[HistorySession], session_id: str) -> int:
         """Find the index of a session in the list."""
         for i, s in enumerate(sessions):
             if s.id == session_id:
                 return i
         return -1
-    
+
     def create_session(
-        self, agent_id: str, session_id: str, source: "EventSource",
+        self,
+        agent_id: str,
+        session_id: str,
+        source: "EventSource",
     ) -> dict[str, Any]:
         """Create a new conversation session."""
-        
+
         now = _now_iso()
         session = HistorySession(
             id=session_id,
@@ -175,7 +179,7 @@ class HistoryStore:
         idx = self._find_session_index(sessions, session_id)
         if idx < 0:
             raise ValueError(f"Session not found: {session_id}")
-        
+
         session = sessions[idx]
 
         # Append message to session file
@@ -202,13 +206,13 @@ class HistoryStore:
         sessions = self._read_index()
         sessions.sort(key=lambda s: s.update_at, reverse=True)
         return sessions
-    
+
     def get_messages(self, session_id: str) -> list[HistoryMessage]:
         """Get all messages for a session."""
         session_file = self._session_path(session_id)
         if not session_file.exists():
             return []
-        
+
         messages: list[HistoryMessage] = []
         with open(session_file) as f:
             for line in f:
@@ -220,12 +224,21 @@ class HistoryStore:
                         continue
 
         return messages
-    
+
     def get_session_info(self, session_id: str) -> HistorySession | None:
         """Get session metadata without loading messages."""
         sessions = self._read_index()
         for session in sessions:
             if session.id == session_id:
                 return session
-            
+
         return None
+
+    def update_response_cursor(self, session_id: str, **cursor: Any) -> None:
+        """Persist the server cursor only after its local messages are durable."""
+        sessions = self._read_index()
+        idx = self._find_session_index(sessions, session_id)
+        if idx < 0:
+            raise ValueError(f"Session not found: {session_id}")
+        sessions[idx] = sessions[idx].model_copy(update=cursor)
+        self._write_index(sessions)

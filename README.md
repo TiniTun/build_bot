@@ -120,6 +120,38 @@ timezone: Australia/Brisbane
 
 `provider` is a descriptive label; LiteLLM selects the actual backend from `model`. A custom OpenAI-compatible endpoint can be set with `api_base`. Individual agents may override the global model and generation settings in their `AGENT.md` frontmatter.
 
+To use GPT-5.6 reasoning with function tools, select the explicit LiteLLM Responses transport:
+
+```yaml
+llm:
+  provider: openai
+  model: gpt-5.6-sol
+  api_key: sk-...
+  api_mode: responses
+  reasoning_effort: medium
+  store: true
+  max_tokens: 8192
+```
+
+`api_mode` defaults to `chat_completions` for existing configurations. Responses calls use
+`litellm.aresponses`, map `max_tokens` to `max_output_tokens` (reasoning and visible text
+share this budget), and send function results using their `call_id`. Tools still execute
+locally through the same capability and confirmation policies, sequentially.
+
+This first Responses implementation requires explicit `store: true`: the API retains
+response state and local session metadata remembers its continuation ID. Each request
+sends fresh instructions and only the messages not yet acknowledged by that ID.
+Local JSONL history remains readable, including sessions created before this change.
+Changing the model or endpoint, repairing interrupted tool history, or compacting the
+conversation starts a fresh chain from local history. Stateless encrypted-reasoning
+replay (`store: false`) is not implemented.
+
+Agents using another backend can override `api_mode: chat_completions` in their `llm`
+frontmatter. Set `reasoning_effort: null` when that backend should not inherit an OpenAI
+reasoning setting. Unsupported configurations fail explicitly; the provider does not
+silently switch APIs or disable reasoning. Traces identify the API mode, response ID,
+status and token usage; reasoning payloads are excluded.
+
 Start a local chat:
 
 ```bash
