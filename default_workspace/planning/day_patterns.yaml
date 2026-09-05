@@ -46,17 +46,17 @@ weekdays:
       priority: high
       energy: high
       category: work
-    - name: Walk
+    - name: Sport
       duration_minutes: 30
       priority: medium
-      energy: low
+      energy: high
       category: recovery
   wed:
-    - name: Deep work
+    - name: Sport
       duration_minutes: 60
       priority: high
       energy: high
-      category: work
+      category: recovery
     - name: Admin block
       duration_minutes: 30
       priority: low
@@ -68,21 +68,16 @@ weekdays:
       priority: high
       energy: high
       category: work
-    - name: Walk
+    - name: Sport
       duration_minutes: 30
       priority: medium
-      energy: low
+      energy: high
       category: recovery
-  fri:
+  fri: []
+  sat: []
+  sun: 
     - name: Weekly review
       duration_minutes: 45
       priority: essential
       energy: medium
       category: admin
-    - name: Walk
-      duration_minutes: 30
-      priority: medium
-      energy: low
-      category: recovery
-  sat: []
-  sun: []

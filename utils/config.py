@@ -17,6 +17,7 @@ from utils.mcp_config import (
     McpToolPolicy,
 )
 
+
 class LLMDebugConfig(BaseModel):
     """Local LLM trace-logging toggles.
 
@@ -42,19 +43,48 @@ class LLMConfig(BaseModel):
     model: str
     api_key: str
     api_base: str | None = None
-    temperature: float = Field(default=0.7, ge=0., le=2.0)
+    api_mode: Literal["chat_completions", "responses"] = "chat_completions"
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None = None
+    store: bool | None = None
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=2048, ge=0)
     extra: dict[str, Any] = Field(default_factory=dict)
     debug: LLMDebugConfig = Field(default_factory=LLMDebugConfig)
+
+    @model_validator(mode="after")
+    def validate_api_settings(self) -> "LLMConfig":
+        for key in ("store", "reasoning_effort"):
+            value = getattr(self, key)
+            if value is not None and key in self.extra and self.extra[key] != value:
+                raise ValueError(f"Conflicting {key} in llm and llm.extra")
+        if self.api_mode == "responses":
+            if self.store is not True and self.extra.get("store") is not True:
+                raise ValueError("Responses sessions require explicit store: true for continuation")
+            reserved = {
+                "input",
+                "messages",
+                "instructions",
+                "previous_response_id",
+                "conversation",
+                "model",
+                "tools",
+                "api_key",
+                "api_base",
+                "max_output_tokens",
+                "reasoning",
+                "stream",
+                "background",
+                "context_management",
+            }
+            if reserved.intersection(self.extra):
+                raise ValueError("Responses extra contains parameters managed by the session/provider")
+        return self
 
     @field_validator("model")
     @classmethod
     def model_must_not_be_blank(cls, v: str) -> str:
         if not v or not v.strip():
-            raise ValueError(
-                "model must be a LiteLLM model string, "
-                "e.g. 'gpt-4' or 'anthropic/claude-opus-4.8'"
-            )
+            raise ValueError("model must be a LiteLLM model string, e.g. 'gpt-4' or 'anthropic/claude-opus-4.8'")
         return v
 
     @field_validator("api_base")
@@ -218,9 +248,7 @@ class PlanningConfig(BaseModel):
         # A typo here would point every planner write at the user's own
         # calendar, so it is rejected at load time rather than at write time.
         if v is not None and v.strip().lower() == "primary":
-            raise ValueError(
-                "planning_calendar_id must be a dedicated calendar, never 'primary'"
-            )
+            raise ValueError("planning_calendar_id must be a dedicated calendar, never 'primary'")
         return v
 
     @field_validator("plan_deadline")
@@ -252,7 +280,7 @@ class Config(BaseModel):
     event_path: Path = Field(default=Path(".event"))
     websearch: BraveWebSearchConfig | None = None
     places: GooglePlacesConfig | None = None
-    webread:Crawl4AIWebReadConfig | None = None
+    webread: Crawl4AIWebReadConfig | None = None
     channels: ChannelConfig = Field(default_factory=ChannelConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     tools: ToolsConfig | None = None
@@ -290,7 +318,7 @@ class Config(BaseModel):
     def resolve_paths(self) -> "Config":
         """Resolve relative paths to absolute using workspace."""
         if not self.workspace.is_absolute():
-            self.workspace = self.workspace.resolve()     
+            self.workspace = self.workspace.resolve()
 
         for field_name in (
             "agents_path",
@@ -310,7 +338,7 @@ class Config(BaseModel):
             self.planning.resolve(self.workspace)
 
         return self
-    
+
     @classmethod
     def load(cls, workspace_dir: Path) -> "Config":
         """Load configuration from workspace directory."""
@@ -329,10 +357,10 @@ class Config(BaseModel):
             with open(file=user_config) as f:
                 config_data = cls._deep_merge(config_data, yaml.safe_load(f) or {})
 
-        if runtime_config.exists():    
+        if runtime_config.exists():
             with open(runtime_config, "r") as f:
                 config_data = cls._deep_merge(config_data, yaml.safe_load(f) or {})
-        
+
         return config_data
 
     @staticmethod
@@ -341,11 +369,7 @@ class Config(BaseModel):
         result = base.copy()
 
         for key, value in override.items():
-            if (
-                key in result
-                and isinstance(result[key], dict)
-                and isinstance(value, dict)
-            ):
+            if key in result and isinstance(result[key], dict) and isinstance(value, dict):
                 result[key] = Config._deep_merge(result[key], value)
             else:
                 result[key] = value
@@ -426,8 +450,8 @@ class ConfigHandler(FileSystemEventHandler):
     def on_modified(self, event) -> None:
         """Reload config when config.user.yaml changes."""
         if event.is_directory:
-            return 
-        
+            return
+
         path = Path(event.src_path).name
         if path in {"config.user.yaml", "config.runtime.yaml"}:
             self._cofig.reload()
