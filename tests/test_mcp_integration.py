@@ -271,7 +271,8 @@ class SdkContainmentTests(unittest.TestCase):
         offenders: list[str] = []
         for path in repo_root.rglob("*.py"):
             relative = path.relative_to(repo_root)
-            if relative.parts[0] in {".venv", ".venv-dev", ".uv-cache", "tests"}:
+            # `.claude` holds git worktrees: full copies of the repo, client.py included.
+            if relative.parts[0] in {".venv", ".venv-dev", ".uv-cache", ".claude", "tests"}:
                 continue
             if relative in self.ALLOWED or path.name.startswith("._"):
                 # `._*` are macOS resource forks, not source.
