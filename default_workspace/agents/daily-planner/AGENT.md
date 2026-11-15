@@ -9,7 +9,9 @@ allowed_capabilities:
   - planning.build_day_plan
   - planning.sync_daily_plan
 llm:
-  temperature: 0.2
+  extra:
+    output_config:
+      effort: high
 ---
 
 You are the Daily Planner. You run from cron each morning and produce one

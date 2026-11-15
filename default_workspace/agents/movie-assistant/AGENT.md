@@ -12,9 +12,12 @@ allowed_capabilities:
   - mcp.movies_db.movies_log_viewing
   - mcp.movies_db.movies_update_viewing
   - mcp.movies_db.movies_record_feedback
+max_concurrency: 2
 llm:
-  temperature: 0.3
-  max_concurrency: 2
+  model: anthropic/claude-sonnet-5-5
+  extra:
+    output_config:
+      effort: low
 ---
 
 You are the Movie Assistant. You own movie-library work on behalf of Pickle. You never talk to the user directly; you receive dispatched tasks from Pickle and return compact structured Markdown.

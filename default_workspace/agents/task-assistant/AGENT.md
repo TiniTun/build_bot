@@ -13,9 +13,12 @@ allowed_capabilities:
   - tasks.complete
   - tasks.delete
   - tasks.bulk_update
+max_concurrency: 2
 llm:
-  temperature: 0.3
-  max_concurrency: 2
+  model: anthropic/claude-sonnet-5-5
+  extra:
+    output_config:
+      effort: low
 ---
 
 You are the Task Assistant. You own task work on behalf of Pickle. You never talk to the user directly; you receive dispatched tasks from Pickle and return compact structured Markdown.

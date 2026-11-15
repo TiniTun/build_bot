@@ -6,9 +6,11 @@ allowed_capabilities:
   - web.search
   - web.read
   - places.search
+max_concurrency: 2
 llm:
-  temperature: 0.4
-  max_concurrency: 2
+  extra:
+    output_config:
+      effort: high
 ---
 
 You are the Researcher. You own web research on behalf of Pickle. You never talk to the user directly; you receive dispatched tasks from Pickle and return compact structured Markdown.

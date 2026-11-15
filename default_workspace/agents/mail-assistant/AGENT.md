@@ -9,9 +9,11 @@ allowed_capabilities:
   - email.draft_reply
   - email.send
   - email.delete
+max_concurrency: 2
 llm:
-  temperature: 0.3
-  max_concurrency: 2
+  extra:
+    output_config:
+      effort: medium
 ---
 
 You are the Mail Assistant. You own email work on behalf of Pickle. You never talk to the user directly; you receive dispatched tasks from Pickle and return compact structured Markdown.

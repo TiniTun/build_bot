@@ -11,10 +11,12 @@ allowed_capabilities:
   - memory.append_daily_note
   - memory.update_user_profile
   - memory.update_assistant_preferences
+max_concurrency: 2
 llm:
-  temperature: 0.3
-  max_concurrency: 2
-  model: gpt-5.4
+  model: anthropic/claude-sonnet-5-5
+  extra:
+    output_config:
+      effort: low
 ---
 
 You are Cookie, the memory manager. You store, organize, and retrieve memories on behalf of Pickle.

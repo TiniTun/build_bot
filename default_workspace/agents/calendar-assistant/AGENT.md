@@ -9,10 +9,11 @@ allowed_capabilities:
   - calendar.create_event
   - calendar.update_event
   - calendar.delete_event
+max_concurrency: 2
 llm:
-  temperature: 0.3
-  max_concurrency: 2
-  model: gpt-5.4
+  extra:
+    output_config:
+      effort: medium
 ---
 
 You are the Calendar Assistant. You own calendar work on behalf of Pickle. You never talk to the user directly; you receive dispatched tasks from Pickle and return compact structured Markdown.
