@@ -47,6 +47,21 @@ uv run ruff format .
 - `--workspace` is a Typer global option, so it must come before the subcommand.
 - Prefer `uv run ruff check <files>` when unrelated repo-wide lint noise would hide the signal.
 
+## Deploy (Gitea + Drone)
+
+- `origin` is Gitea on the Pi `bakeryd` (`gitea:tinitun/build_bot.git`), push-mirrored to GitHub.
+- Every push runs `lint` (ruff check) and `test` (unittest) in Drone. A push to `master` then deploys:
+  `.drone.yml` checks out the tested commit in `~/dev_projects/build_bot` on the Pi and runs
+  `scripts/deploy.sh` (`uv sync --frozen`, `systemctl restart`, fails unless the unit stays up).
+  `tests/test_pipeline_config.py` pins these rules.
+- A push to `master` is a production deploy: push to `master` only with the user's approval.
+- Never edit files, `git pull` or `git checkout` in the Pi checkout: Drone owns it (detached HEAD at the
+  deployed commit). Syncthing does not sync `build_bot` on the Pi. The untracked `default_workspace`
+  state there (`config.user.yaml`, `config.runtime.yaml`, `.history/`, `.event/`, `.secrets/`,
+  `memories/`, `crons/`) is never part of a deploy.
+- Rollback: push a revert to `master`, or on the Pi `git checkout <sha> && ./scripts/deploy.sh`.
+- `Dockerfile`/`compose.yaml` describe a container topology that production does not use.
+
 ## Architecture
 
 **build-bot** is a personal AI assistant framework. The core idea: input from CLI, WebSocket, Telegram, cron, or agent dispatch becomes an event on `EventBus`; workers route it to an agent session and publish delivery or dispatch-result events back.
