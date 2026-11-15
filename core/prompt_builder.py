@@ -10,6 +10,7 @@ from core.cron_loader import CronDef
 
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
+from zoneinfo import ZoneInfo
 
 
 if TYPE_CHECKING:
@@ -44,7 +45,7 @@ class PromptBuilder:
         layers.append(
             self._build_return_context(
                 agent_id=state.agent.agent_def.id,
-                timestamp=datetime.now(),
+                timestamp=self._now(),
             )
         )
 
@@ -108,9 +109,23 @@ class PromptBuilder:
             lines.append(f"- **{cron.name}**: {cron.description}")
         return "\n".join(lines)
 
+    def _now(self) -> datetime:
+        """Current time in the configured timezone (the clock cron runs on).
+
+        Without a configured timezone this stays the host's naive local time.
+        """
+        timezone = self.context.config.timezone
+        if timezone:
+            return datetime.now(ZoneInfo(timezone)).replace(microsecond=0)
+        return datetime.now()
+
     def _build_return_context(self, agent_id: str, timestamp: datetime) -> str:
         """Build runtime info section."""
-        return f"## Runtime\n\nAgent: {agent_id}\nTime: {timestamp.isoformat()}"
+        lines = [f"Agent: {agent_id}", f"Time: {timestamp.isoformat()}"]
+        timezone = self.context.config.timezone
+        if timezone:
+            lines.append(f"Timezone: {timezone}")
+        return "## Runtime\n\n" + "\n".join(lines)
 
     def _build_channel_hint(self, source: "EventSource") -> str:
         """Build platform hint."""
