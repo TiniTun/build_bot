@@ -13,6 +13,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = ROOT / ".drone.yml"
 RETRY_SCRIPT = ROOT / "ci" / "retry.sh"
+DEPLOY_SCRIPT = ROOT / "scripts" / "deploy.sh"
 
 GATE_STEPS = ["lint", "test"]
 DEPLOY_STEPS = ["deploy"]
@@ -77,6 +78,32 @@ class DronePipelineTest(unittest.TestCase):
 
     def test_retry_script_executable(self) -> None:
         self.assertTrue(os.access(RETRY_SCRIPT, os.X_OK))
+
+
+class DeployScriptTest(unittest.TestCase):
+    def _script(self) -> str:
+        return DEPLOY_SCRIPT.read_text(encoding="utf-8")
+
+    def test_deploy_script_strict_and_executable(self) -> None:
+        script = self._script()
+        self.assertTrue(script.startswith("#!/bin/bash\n"))
+        self.assertIn("set -euo pipefail", script)
+        self.assertTrue(os.access(DEPLOY_SCRIPT, os.X_OK))
+
+    def test_deploy_script_frozen_sync_with_retry(self) -> None:
+        # --frozen: a lockfile out of step with pyproject.toml fails the deploy instead of re-resolving.
+        self.assertIn("ci/retry.sh uv sync --frozen", self._script())
+
+    def test_deploy_script_restarts_and_checks_unit(self) -> None:
+        script = self._script()
+        for needle in ("sudo systemctl restart", "ActiveState", "NRestarts", "journalctl"):
+            self.assertIn(needle, script)
+
+    def test_deploy_script_never_destroys_untracked(self) -> None:
+        # The Pi's config.user.yaml, history and secrets are untracked and must survive a deploy.
+        script = self._script()
+        self.assertNotIn("git clean", script)
+        self.assertNotIn("reset --hard", script)
 
 
 if __name__ == "__main__":
