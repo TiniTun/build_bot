@@ -3,10 +3,7 @@
 The frontmatter assertions below parse AGENT.md directly with ``yaml.safe_load``
 rather than going through ``AgentLoader``/``Config.load`` against the real
 ``default_workspace``: that path needs ``config.user.yaml``, which is
-gitignored and absent in a fresh worktree (see
-``test_real_default_workspace_cookie_def_is_memory_only`` and
-``test_task_assistant_exposes_exactly_its_task_toolset``, which fail here for
-exactly that reason). Parsing the frontmatter needs no config at all.
+gitignored and absent in a fresh worktree. Parsing the frontmatter needs no config at all.
 
 The end-to-end registry test below still needs a working ``Config``, so it
 builds one from an isolated synthetic workspace (``tests.helpers.make_workspace``)

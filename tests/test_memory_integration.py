@@ -13,7 +13,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tests.helpers import make_context, make_workspace, write_definition
+from tests.helpers import copy_real_agent, make_context, make_workspace, write_definition
 from tools.capabilities import ToolPolicy
 from tools.capability_catalog import build_capability_registry
 from tools.registry import ToolRegistry
@@ -194,12 +194,10 @@ class CookieCapabilityNarrowingTests(unittest.TestCase):
     def test_real_default_workspace_cookie_def_is_memory_only(self) -> None:
         # The shipped cookie agent definition is narrowed to the six memory.*
         # capability ids (and nothing filesystem/shell related).
-        from core.context import SharedContext
-        from utils.config import Config
-
-        config = Config.load(Path("default_workspace"))
-        context = SharedContext(config, channels=[])
-        cookie_def = context.agent_loader.load("cookie")
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            copy_real_agent(workspace, "cookie")
+            cookie_def = make_context(workspace).agent_loader.load("cookie")
         self.assertIsNotNone(cookie_def.allowed_capabilities)
         self.assertEqual(
             set(cookie_def.allowed_capabilities), set(MEMORY_CAPABILITY_IDS)

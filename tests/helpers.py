@@ -1,5 +1,6 @@
 """Test helpers for building isolated workspaces."""
 
+import shutil
 from pathlib import Path
 
 import yaml
@@ -60,6 +61,20 @@ def make_workspace(
     )
 
     return workspace
+
+
+REAL_AGENTS = Path(__file__).resolve().parents[1] / "default_workspace" / "agents"
+
+
+def copy_real_agent(workspace: Path, agent_id: str) -> None:
+    """Install the shipped ``default_workspace`` agent into an isolated workspace.
+
+    Lets a test validate a real AGENT.md without loading the real workspace's
+    gitignored ``config.user.yaml``, which a clean checkout (CI) does not have.
+    """
+    target = workspace / "agents" / agent_id
+    shutil.rmtree(target, ignore_errors=True)
+    shutil.copytree(REAL_AGENTS / agent_id, target)
 
 
 def make_context(workspace: Path):

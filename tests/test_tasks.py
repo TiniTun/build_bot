@@ -22,7 +22,7 @@ from provider.tasks import (
     get_task_provider,
 )
 from provider.tasks.todoist import TodoistTaskProvider
-from tests.helpers import make_context, make_workspace
+from tests.helpers import copy_real_agent, make_context, make_workspace
 from tools.base import ToolErrorCode
 from tools.capabilities import ToolPolicy
 from tools.capability_catalog import (
@@ -290,11 +290,15 @@ class TaskCapabilityVisibilityTests(unittest.TestCase):
             )
 
     def test_task_assistant_exposes_exactly_its_task_toolset(self) -> None:
-        # Use the real default workspace so we validate the shipped task-assistant
-        # AGENT.md (its allowed_capabilities), not a synthetic test agent.
-        workspace = Path(__file__).resolve().parents[1] / "default_workspace"
+        # Validate the shipped task-assistant AGENT.md (its allowed_capabilities),
+        # not a synthetic test agent, inside an isolated workspace: the real
+        # default_workspace's config.user.yaml is gitignored and absent in CI.
         from core.context import SharedContext
 
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        workspace = make_workspace(Path(tmp.name))
+        copy_real_agent(workspace, "task-assistant")
         config = Config.load(workspace)
         config.external_tools = ExternalToolsConfig(
             tasks=TasksProviderConfig(enabled=True)

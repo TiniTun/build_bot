@@ -55,6 +55,9 @@ uv run ruff format .
   `scripts/deploy.sh` (`uv sync --locked`, `systemctl restart`, fails unless the unit stays up).
   `tests/test_pipeline_config.py` pins these rules.
 - A push to `master` is a production deploy: push to `master` only with the user's approval.
+- CI runs on a clean checkout without the gitignored `default_workspace/config.user.yaml`: tests must
+  never `Config.load` the real `default_workspace`; use `tests.helpers.make_workspace` (plus
+  `copy_real_agent` to check a shipped AGENT.md).
 - Never edit files, `git pull` or `git checkout` in the Pi checkout: Drone owns it (detached HEAD at the
   deployed commit). Syncthing does not sync `build_bot` on the Pi. The untracked `default_workspace`
   state there (`config.user.yaml`, `config.runtime.yaml`, `.history/`, `.event/`, `.secrets/`,
