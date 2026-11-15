@@ -14,7 +14,8 @@ SETTLE_SECONDS="${DEPLOY_SETTLE_SECONDS:-15}"
 SHA="$(git rev-parse --short HEAD)"
 echo "deploying $SHA to $UNIT"
 
-./ci/retry.sh uv sync --frozen
+# --locked: install exactly uv.lock, and fail if it is stale against pyproject.toml.
+./ci/retry.sh uv sync --locked
 
 sudo systemctl restart "$UNIT"
 

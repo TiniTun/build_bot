@@ -76,6 +76,24 @@ class DronePipelineTest(unittest.TestCase):
         self.assertLess(checkout, run)
         self.assertIn("cd ~/dev_projects/build_bot", script)
 
+    def test_pipelines_never_overlap(self) -> None:
+        # Two pushes in quick succession must deploy in push order, never an older commit last,
+        # and never two deploys racing on one checkout and venv.
+        self.assertEqual(_pipeline()["concurrency"], {"limit": 1})
+
+    def test_deploy_refuses_modified_tracked_files(self) -> None:
+        # `git checkout` carries local edits to tracked files along, so production would run
+        # code that was never tested. Untracked workspace state is not affected by this check.
+        script = _steps()["deploy"]["settings"]["script"]
+        guard = next(i for i, line in enumerate(script) if line.startswith("git diff --quiet HEAD ||"))
+        checkout = script.index('git checkout --quiet --detach "$DRONE_COMMIT_SHA"')
+        self.assertLess(guard, checkout)
+
+    def test_deploy_ssh_script_never_destroys_untracked(self) -> None:
+        script = "\n".join(_steps()["deploy"]["settings"]["script"])
+        for forbidden in ("git clean", "reset --hard", "checkout -f", "stash"):
+            self.assertNotIn(forbidden, script)
+
     def test_retry_script_executable(self) -> None:
         self.assertTrue(os.access(RETRY_SCRIPT, os.X_OK))
 
@@ -90,9 +108,12 @@ class DeployScriptTest(unittest.TestCase):
         self.assertIn("set -euo pipefail", script)
         self.assertTrue(os.access(DEPLOY_SCRIPT, os.X_OK))
 
-    def test_deploy_script_frozen_sync_with_retry(self) -> None:
-        # --frozen: a lockfile out of step with pyproject.toml fails the deploy instead of re-resolving.
-        self.assertIn("ci/retry.sh uv sync --frozen", self._script())
+    def test_deploy_script_locked_sync_with_retry(self) -> None:
+        # --locked, not --frozen: --frozen trusts a stale lock and silently omits new dependencies
+        # (e.g. on a manual rollback); --locked fails the deploy instead.
+        script = self._script()
+        self.assertIn("ci/retry.sh uv sync --locked", script)
+        self.assertNotIn("--frozen", script)
 
     def test_deploy_script_restarts_and_checks_unit(self) -> None:
         script = self._script()

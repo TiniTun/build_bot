@@ -19,6 +19,11 @@ platform:
   os: linux
   arch: arm64
 
+# One build at a time, in push order: overlapping builds could deploy an older commit last, or race
+# two deploys on the same checkout and venv.
+concurrency:
+  limit: 1
+
 steps:
   - name: lint
     image: ghcr.io/astral-sh/uv:0.12.7-python3.11-trixie-slim
@@ -60,6 +65,8 @@ steps:
         - set -e
         - cd ~/dev_projects/build_bot
         - git fetch --quiet origin master
+        # A local edit to a tracked file would ride along with the checkout: refuse instead.
+        - git diff --quiet HEAD || { echo "Pi checkout has modified tracked files; refusing to deploy" >&2; git status --short >&2; exit 1; }
         - git checkout --quiet --detach "$DRONE_COMMIT_SHA"
         - ./scripts/deploy.sh
     when:
