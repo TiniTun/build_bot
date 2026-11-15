@@ -88,6 +88,35 @@ class LLMProviderChatTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("temperature", kwargs)
         self.assertEqual(kwargs["max_tokens"], 1234)
 
+    async def test_chat_omits_temperature_for_claude_models_without_sampling(self) -> None:
+        for model in (
+            "anthropic/claude-opus-5-5",
+            "anthropic/claude-opus-4.8",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "anthropic/claude-fable-5-2",
+            "bedrock/anthropic.claude-opus-5-5",
+        ):
+            with self.subTest(model=model):
+                provider = LLMProvider(model=model, api_key="sk-ant-test", temperature=0.3)
+                with patch(
+                    "provider.llm.base.acompletion",
+                    new=AsyncMock(return_value=_fake_response()),
+                ) as mock_acompletion:
+                    await provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+                self.assertNotIn("temperature", mock_acompletion.await_args.kwargs)
+
+    async def test_chat_keeps_temperature_for_older_claude_models(self) -> None:
+        provider = LLMProvider(model="anthropic/claude-opus-4-6", api_key="sk-ant-test", temperature=0.3)
+        with patch(
+            "provider.llm.base.acompletion",
+            new=AsyncMock(return_value=_fake_response()),
+        ) as mock_acompletion:
+            await provider.chat(messages=[{"role": "user", "content": "hello"}])
+
+        self.assertEqual(mock_acompletion.await_args.kwargs["temperature"], 0.3)
+
     async def test_chat_forwards_extra_settings(self) -> None:
         config = LLMConfig(
             provider="anthropic",

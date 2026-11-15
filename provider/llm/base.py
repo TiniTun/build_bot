@@ -28,10 +28,26 @@ logger = logging.getLogger("provider.llm")
 litellm.drop_params = True
 
 
+# Claude models whose API rejects any sampling parameter with a 400. LiteLLM
+# still lists temperature as supported for them, so drop_params does not help.
+_CLAUDE_WITHOUT_SAMPLING = (
+    "claude-fable-",
+    "claude-mythos-",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-5",
+    "claude-haiku-5",
+)
+
+
 def _supports_custom_temperature(model: str) -> bool:
     """Return whether the configured model accepts non-default temperature."""
     model_name = model.rsplit("/", 1)[-1].lower()
-    return not model_name.startswith("gpt-5")
+    if model_name.startswith("gpt-5"):
+        return False
+    normalized = model_name.replace(".", "-")
+    return not any(prefix in normalized for prefix in _CLAUDE_WITHOUT_SAMPLING)
 
 
 def _is_missing_response_cursor(error: Exception) -> bool:
