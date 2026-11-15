@@ -1,0 +1,69 @@
+# Drone CI/CD for build_bot on the Pi (bakeryd): every push runs lint -> test;
+# a push to master then deploys over SSH (git checkout of the tested commit + scripts/deploy.sh).
+#
+# Same shape as health_data's pipeline on the same runner:
+# - gate steps run serially: concurrent `uv sync` makes the Pi's DNS drop lookups;
+# - each step keeps its virtualenv in its own /tmp, not in the shared workspace;
+# - network-touching commands go through ci/retry.sh;
+# - the SSH plugin is pinned by digest: Drone re-pulls `latest` before every step.
+#
+# No host volumes and no docker socket, so the repository does not need to be Trusted in Drone.
+# App secrets never pass through Drone: they stay in the gitignored default_workspace on the Pi.
+# Drone holds only the SSH deploy secrets. tests/test_pipeline_config.py pins all of this.
+
+kind: pipeline
+type: docker
+name: build-bot
+
+platform:
+  os: linux
+  arch: arm64
+
+steps:
+  - name: lint
+    image: ghcr.io/astral-sh/uv:0.12.7-python3.11-trixie-slim
+    environment:
+      UV_PROJECT_ENVIRONMENT: /tmp/venv
+    commands:
+      - ./ci/retry.sh uv sync --locked
+      - uv run ruff check .
+
+  - name: test
+    image: ghcr.io/astral-sh/uv:0.12.7-python3.11-trixie-slim
+    depends_on:
+      - lint
+    environment:
+      UV_PROJECT_ENVIRONMENT: /tmp/venv
+    commands:
+      - ./ci/retry.sh uv sync --locked
+      - uv run python -m unittest discover -s tests -p 'test_*.py'
+
+  - name: deploy
+    image: appleboy/drone-ssh@sha256:bf3b991d1778247754439739bb136b7be4fbdbafd58fe6f23bc36e4204598feb
+    depends_on:
+      - lint
+      - test
+    environment:
+      # drone-ssh forwards only the names listed in `envs` to the remote shell.
+      DRONE_COMMIT_SHA: ${DRONE_COMMIT_SHA}
+    settings:
+      host:
+        from_secret: deploy_host
+      username:
+        from_secret: deploy_username
+      key:
+        from_secret: deploy_ssh_key
+      command_timeout: 20m
+      envs:
+        - DRONE_COMMIT_SHA
+      script:
+        - set -e
+        - cd ~/dev_projects/build_bot
+        - git fetch --quiet origin master
+        - git checkout --quiet --detach "$DRONE_COMMIT_SHA"
+        - ./scripts/deploy.sh
+    when:
+      branch:
+        - master
+      event:
+        - push
