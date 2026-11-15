@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
 
 UNIT="${BUILD_BOT_UNIT:-build-bot.service}"
-SETTLE_SECONDS="${DEPLOY_SETTLE_SECONDS:-15}"
+SETTLE_SECONDS="${DEPLOY_SETTLE_SECONDS:-30}"
 SHA="$(git rev-parse --short HEAD)"
 echo "deploying $SHA to $UNIT"
 
