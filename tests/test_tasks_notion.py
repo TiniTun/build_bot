@@ -103,7 +103,7 @@ class NotionQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"Status" = ?', data["query"])
         self.assertEqual(data["params"][0], "Inbox")
         self.assertNotIn("Inbox", data["query"])  # bound, never interpolated
-        self.assertEqual(len(tasks), 3)
+        self.assertEqual(len(tasks), 4)
         first = tasks[0]
         self.assertEqual(first.id, "40121f6ce43981129943fd9117c4f9c3")
         self.assertEqual(first.content, "Write the provider")
@@ -148,8 +148,8 @@ class NotionQueryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_priority_mapping(self) -> None:
         tasks = await _provider(_query_hub()).list_inbox(10)
-        # Fixture: P2, P1, P3.
-        self.assertEqual([t.priority for t in tasks], [3, 4, 2])
+        # Fixture: P2, P1, P3, P1.
+        self.assertEqual([t.priority for t in tasks], [3, 4, 2, 4])
 
     async def test_priority_mapping_p4_and_absent(self) -> None:
         payload = json.loads(_fixture_text())
@@ -176,6 +176,15 @@ class NotionQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tasks[0].due_string, "2026-11-20T09:00:00.000+10:00")
         self.assertTrue(tasks[0].is_completed)
         self.assertIsNone(tasks[1].due_date)
+
+    async def test_live_shaped_date_only_due_parses(self) -> None:
+        # Live shape: a date-only Due is "YYYY-MM-DD" with is_datetime 0.
+        tasks = await _provider(_query_hub()).list_inbox(10)
+        due = tasks[3]
+        self.assertEqual(due.content, "Renew the passport")
+        self.assertEqual(due.due_date, "2026-10-30")
+        self.assertEqual(due.due_string, "2026-10-30")
+        self.assertFalse(due.is_completed)
 
     async def test_search_uses_name_contains_param(self) -> None:
         hub = _query_hub()
