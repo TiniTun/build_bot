@@ -613,3 +613,119 @@ class ServerInstructionsTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_UPDATE_RULES = {
+    "allowed_keys": ["page_id", "command", "properties", "content", "position", "allow_async"],
+    "allowed_values": {"command": ["update_properties", "insert_content"]},
+    "forbid_null_properties": True,
+    "forbidden_property_values": {"Status": ["Dropped"]},
+}
+_CREATE_RULES = {
+    "allowed_keys": [
+        "pages",
+        "parent",
+        "allow_async",
+        "creation_mode",
+        "instructions_version",
+        "skill",
+    ],
+    "forbidden_values": {"parent": ["memory"]},
+}
+
+
+class ArgumentGuardTests(unittest.IsolatedAsyncioTestCase):
+    async def _call(self, tool_name: str, rules: dict, **kwargs):
+        client = FakeMcpClient("notion", tools=(fake_tool("notion", tool_name),))
+        server = {
+            "url": "http://notion:1/mcp",
+            "allowed_tools": [tool_name],
+            "tool_policies": {tool_name: {"effect": "write", "arguments": rules}},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = await _context_with_mcp(workspace, {"notion": server}, {"notion": client})
+            pairs = build_mcp_capabilities(context)
+            tool_obj = next(t for _, t in pairs)
+            raw = await tool_obj.execute(session=SimpleNamespace(shared_context=context), **kwargs)
+            await context.mcp_hub.stop()
+        return raw, client
+
+    async def _update(self, **kwargs):
+        return await self._call("notion-update-page", _UPDATE_RULES, **kwargs)
+
+    def _assert_denied(self, raw: str, client) -> None:
+        payload = json.loads(raw)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["code"], ToolErrorCode.PERMISSION_DENIED.value)
+        self.assertEqual(client.calls, [])
+
+    async def test_update_properties_allowed(self) -> None:
+        raw, client = await self._update(page_id="p", command="update_properties", properties={"Status": "Done"})
+        self.assertEqual(len(client.calls), 1)
+        self.assertNotIn('"ok": false', raw)
+
+    async def test_insert_content_allowed(self) -> None:
+        _, client = await self._update(page_id="p", command="insert_content", content="x")
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_replace_content_denied(self) -> None:
+        raw, client = await self._update(page_id="p", command="replace_content", content="x")
+        self._assert_denied(raw, client)
+
+    async def test_update_content_denied(self) -> None:
+        raw, client = await self._update(page_id="p", command="update_content")
+        self._assert_denied(raw, client)
+
+    async def test_unknown_key_denied(self) -> None:
+        for key in ("is_skill", "allow_deleting_content", "icon"):
+            raw, client = await self._update(page_id="p", command="insert_content", **{key: True})
+            self._assert_denied(raw, client)
+
+    async def test_null_property_denied(self) -> None:
+        raw, client = await self._update(page_id="p", command="update_properties", properties={"Due": None})
+        self._assert_denied(raw, client)
+
+    async def test_status_dropped_denied(self) -> None:
+        raw, client = await self._update(page_id="p", command="update_properties", properties={"Status": "Dropped"})
+        self._assert_denied(raw, client)
+
+    async def test_non_mapping_properties_denied(self) -> None:
+        raw, client = await self._update(page_id="p", command="update_properties", properties="x")
+        self._assert_denied(raw, client)
+
+    async def test_unhashable_command_denied(self) -> None:
+        raw, client = await self._update(page_id="p", command=["insert_content"])
+        self._assert_denied(raw, client)
+
+    async def test_create_pages_memory_parent_denied(self) -> None:
+        for parent in ("memory", {"type": "x", "page_id": "memory"}):
+            raw, client = await self._call(
+                "notion-create-pages", _CREATE_RULES, pages=[{"properties": {}}], parent=parent
+            )
+            self._assert_denied(raw, client)
+
+    async def test_create_pages_regular_parent_allowed(self) -> None:
+        _, client = await self._call(
+            "notion-create-pages",
+            _CREATE_RULES,
+            pages=[{"properties": {}}],
+            parent={"type": "page_id", "page_id": "abc"},
+        )
+        self.assertEqual(len(client.calls), 1)
+
+    async def test_create_pages_is_skill_denied(self) -> None:
+        raw, client = await self._call("notion-create-pages", _CREATE_RULES, pages=[{"properties": {}}], is_skill=True)
+        self._assert_denied(raw, client)
+
+    async def test_denied_call_never_reaches_hub(self) -> None:
+        raw, client = await self._update(page_id="p", command="replace_content")
+        self.assertEqual(client.calls, [])
+        self.assertIn("command", json.loads(raw)["error"]["message"])
+
+    async def test_denial_log_has_no_argument_values(self) -> None:
+        with self.assertLogs("tools.mcp_tools", level="WARNING") as logs:
+            await self._update(page_id="secret-page-id", command="replace_content")
+        text = "\n".join(logs.output)
+        self.assertNotIn("secret-page-id", text)
+        self.assertIn("notion-update-page", text)

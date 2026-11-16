@@ -34,7 +34,7 @@ from provider.mcp.hub import McpHub
 from provider.mcp.models import McpCallResult, McpToolDef
 from tools.base import BaseTool, ToolErrorCode, ToolResult
 from tools.capabilities import CapabilityDef, ToolRiskLevel
-from utils.mcp_config import McpServerConfig, McpToolPolicy
+from utils.mcp_config import McpArgumentRules, McpServerConfig, McpToolPolicy
 
 if TYPE_CHECKING:
     from core.agent import AgentSession
@@ -182,6 +182,63 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _matches(actual: Any, forbidden: Any) -> bool:
+    """Equality that never raises; unhashable/odd values simply do not match."""
+    try:
+        return bool(actual == forbidden)
+    except Exception:  # noqa: BLE001 - uncomparable means "evaluate conservatively"
+        return False
+
+
+def _is_plain_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def check_arguments(rules: McpArgumentRules, arguments: Mapping[str, Any]) -> str | None:
+    """Return a denial reason for ``arguments`` under ``rules``, or None if allowed.
+
+    Fails closed: anything the rules cannot evaluate denies the call. Reasons
+    name keys only, never argument values, so they are safe to log.
+
+    ``forbidden_values[k]`` matches when the argument equals a listed value, and
+    also, for mapping arguments, when any of the mapping's values equals one.
+    This covers ``notion-create-pages`` where ``parent`` may be the string
+    ``"memory"`` or an object that wraps it (``{"page_id": "memory"}``).
+    """
+    if rules.allowed_keys is not None:
+        for key in arguments:
+            if key not in rules.allowed_keys:
+                return f"argument '{key}' is not permitted"
+
+    for key, allowed in rules.allowed_values.items():
+        if key not in arguments:
+            continue
+        value = arguments[key]
+        if not _is_plain_scalar(value) or not any(_matches(value, a) for a in allowed):
+            return f"value of '{key}' is not permitted"
+
+    for key, forbidden in rules.forbidden_values.items():
+        if key not in arguments:
+            continue
+        value = arguments[key]
+        candidates = list(value.values()) if isinstance(value, Mapping) else [value]
+        if any(_matches(c, f) for c in candidates for f in forbidden):
+            return f"value of '{key}' is not permitted"
+
+    if rules.forbid_null_properties or rules.forbidden_property_values:
+        if "properties" in arguments:
+            props = arguments["properties"]
+            if not isinstance(props, Mapping):
+                return "'properties' must be an object"
+            for name, value in props.items():
+                if rules.forbid_null_properties and value is None:
+                    return f"property '{name}' may not be null"
+                for f in rules.forbidden_property_values.get(name, []):
+                    if _matches(value, f):
+                        return f"value of property '{name}' is not permitted"
+    return None
+
+
 class McpTool(BaseTool):
     """One approved remote tool, invoked through the shared hub."""
 
@@ -214,6 +271,24 @@ class McpTool(BaseTool):
                 f"The MCP tool {self.name} is currently unavailable.",
                 user_action="Check `/mcp` for the server's state.",
             ).to_tool_content()
+
+        # Argument rules are read live so a config reload applies immediately.
+        # Only agent calls are guarded: host code calling hub.call_tool is trusted.
+        server_config = hub.server_config(self.server_id)
+        rules = server_config.policy_for(self.remote_tool_name).arguments if server_config else None
+        if rules is not None:
+            reason = check_arguments(rules, kwargs)
+            if reason is not None:
+                logger.warning(
+                    "MCP call denied by argument guard: server=%s tool=%s reason=%s",
+                    self.server_id,
+                    self.remote_tool_name,
+                    reason,
+                )
+                return ToolResult.error(
+                    ToolErrorCode.PERMISSION_DENIED,
+                    f"The call to {self.name} was denied: {reason}.",
+                ).to_tool_content()
 
         try:
             result = await hub.call_tool(self.server_id, self.remote_tool_name, kwargs)
