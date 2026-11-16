@@ -17,6 +17,10 @@ class ProviderPermissionError(ExternalProviderError):
     """Provider rejected the request due to insufficient permissions/scopes."""
 
 
+class ProviderRateLimitError(ExternalProviderError):
+    """Provider throttled the request (rate or quota limit); safe to retry later."""
+
+
 class ProviderNotFoundError(ExternalProviderError):
     """Requested resource was not found by the provider."""
 

@@ -5,8 +5,8 @@ Wraps the synchronous ``googleapiclient`` Gmail service behind async methods
 lazily so importing this module never requires them; ``build_service`` already
 raises ``AuthMissingError`` before any API call when auth/libraries are missing.
 
-Gmail ``HttpError`` is normalized to provider exceptions (401/403 ->
-``ProviderPermissionError``, 404 -> ``ProviderNotFoundError``); unknown failures
+Gmail ``HttpError`` is normalized to provider exceptions by
+``provider.google_errors`` (rate limit, permission, not-found); unknown failures
 propagate and the tool layer maps them to a generic ``provider_error``. Only
 normalized fields ever reach user-visible model text; raw payloads/tokens never
 do.
@@ -18,7 +18,7 @@ from email.mime.text import MIMEText
 from typing import TYPE_CHECKING, Any
 
 from provider.email.base import DraftResult, EmailMessage, EmailSummary
-from provider.external_errors import ProviderNotFoundError, ProviderPermissionError
+from provider.google_errors import map_google_http_error
 
 if TYPE_CHECKING:
     from utils.config import Config, ExternalProviderConfig
@@ -26,17 +26,7 @@ if TYPE_CHECKING:
 
 def _map_http_error(exc: Exception) -> Exception:
     """Map a Gmail ``HttpError`` to a provider exception, else return it as-is."""
-    try:
-        from googleapiclient.errors import HttpError
-    except ImportError:  # pragma: no cover - libs absent means build_service raised
-        return exc
-    if isinstance(exc, HttpError):
-        status = getattr(getattr(exc, "resp", None), "status", None)
-        if status in (401, 403):
-            return ProviderPermissionError("gmail denied the request")
-        if status == 404:
-            return ProviderNotFoundError("gmail resource not found")
-    return exc
+    return map_google_http_error(exc, "gmail")
 
 
 def _header(headers: list[dict[str, Any]], name: str) -> str | None:

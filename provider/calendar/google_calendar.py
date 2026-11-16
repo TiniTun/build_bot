@@ -16,11 +16,8 @@ from provider.calendar.base import (
     CalendarEvent,
     CreateEventRequest,
 )
-from provider.external_errors import (
-    ProviderInvalidRequestError,
-    ProviderNotFoundError,
-    ProviderPermissionError,
-)
+from provider.external_errors import ProviderInvalidRequestError
+from provider.google_errors import map_google_http_error
 
 if TYPE_CHECKING:
     from utils.config import Config, ExternalProviderConfig
@@ -29,22 +26,15 @@ if TYPE_CHECKING:
 def _map_http_error(exc: Exception) -> Exception:
     """Translate a Google ``HttpError`` into a stable provider exception.
 
-    401/403 -> permission, 404 -> not-found, otherwise propagate unchanged so
-    the tool layer maps it to a generic ``provider_error`` without leaking the
-    raw payload.
+    Shared mapping (rate limit / permission / not-found) plus 400 -> invalid
+    request; anything else propagates unchanged so the tool layer maps it to a
+    generic ``provider_error`` without leaking the raw payload.
     """
-    try:
-        from googleapiclient.errors import HttpError
-    except ImportError:
-        return exc
-    if isinstance(exc, HttpError):
-        status = getattr(getattr(exc, "resp", None), "status", None)
-        if status in (401, 403):
-            return ProviderPermissionError("google calendar denied the request")
-        if status == 404:
-            return ProviderNotFoundError("google calendar resource not found")
-        if status == 400:
-            return ProviderInvalidRequestError("google calendar rejected the request")
+    mapped = map_google_http_error(exc, "calendar")
+    if mapped is not exc:
+        return mapped
+    if getattr(getattr(exc, "resp", None), "status", None) == 400:
+        return ProviderInvalidRequestError("google calendar rejected the request")
     return exc
 
 
