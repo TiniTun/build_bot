@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import unittest
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from typing import AsyncIterator, Callable
 from urllib.parse import parse_qs
@@ -427,6 +428,95 @@ class McpOAuthAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(sent, [OLD_REFRESH, "refresh-1-SECRET"])
         self.assertEqual(self.server.mcp_bearers()[-1], "Bearer access-2-SECRET")
+
+    # -- grant state shared across auth instances (one per reconnect) ---------
+
+    async def test_reconnect_after_failed_save_never_replays_the_rotated_out_refresh_token(self) -> None:
+        store = _FlakyStore(self.store.path)
+        store.save(_grant(expires_in=100))
+        sent: list[str] = []
+        self.server.token_handler = _rotating_token_handler(sent)
+
+        store.fail = True
+        await self._call(self._auth(store))
+        self.assertEqual(sent, [OLD_REFRESH])
+
+        # The hub drops the client and builds a new client, auth and store object.
+        self.now += 28_800
+        response = await self._call(self._auth(_FlakyStore(self.store.path)))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sent, [OLD_REFRESH, "refresh-1-SECRET"])
+        self.assertEqual(self.server.mcp_bearers()[-1], "Bearer access-2-SECRET")
+        saved = store.load()
+        assert saved is not None
+        self.assertEqual(saved.refresh_token, "refresh-2-SECRET")
+
+    async def test_new_auth_uses_the_in_memory_grant_while_the_store_is_stale(self) -> None:
+        store = _FlakyStore(self.store.path)
+        store.save(_grant(expires_in=100))
+        sent: list[str] = []
+        self.server.token_handler = _rotating_token_handler(sent)
+        store.fail = True
+        await self._call(self._auth(store))
+
+        await self._call(self._auth(store))
+        self.assertEqual(sent, [OLD_REFRESH])
+        self.assertEqual(self.server.mcp_bearers(), ["Bearer access-1-SECRET", "Bearer access-1-SECRET"])
+
+    async def test_new_login_after_failed_save_is_adopted(self) -> None:
+        store = _FlakyStore(self.store.path)
+        store.save(_grant(expires_in=100))
+        sent: list[str] = []
+        self.server.token_handler = _rotating_token_handler(sent)
+        store.fail = True
+        await self._call(self._auth(store))
+        store.fail = False
+
+        # The operator runs mcp-login: a new grant with a new refresh token.
+        login = replace(
+            _grant(expires_in=40_000, access="login-access-SECRET", refresh="login-refresh-SECRET"), granted_at=NOW
+        )
+        store.save(login)
+        await self._call(self._auth(store))
+        self.assertEqual(self.server.mcp_bearers()[-1], "Bearer login-access-SECRET")
+        self.assertEqual(sent, [OLD_REFRESH])
+
+        self.now += 40_000
+        await self._call(self._auth(store))
+        self.assertEqual(sent, [OLD_REFRESH, "login-refresh-SECRET"])
+
+    async def test_old_auth_adopts_a_new_login_once_its_token_expires(self) -> None:
+        store = _FlakyStore(self.store.path)
+        store.save(_grant(expires_in=100))
+        sent: list[str] = []
+        self.server.token_handler = _rotating_token_handler(sent)
+        auth = self._auth(store)
+        store.fail = True
+        await self._call(auth)
+        store.fail = False
+
+        store.save(
+            replace(_grant(expires_in=60_000, access="login-access-SECRET", refresh="login-refresh-SECRET"), granted_at=NOW)
+        )
+        self.now += 28_800
+        await self._call(auth)
+        self.assertEqual(sent, [OLD_REFRESH])
+        self.assertEqual(self.server.mcp_bearers()[-1], "Bearer login-access-SECRET")
+
+    async def test_new_auth_never_resends_a_dead_refresh_token(self) -> None:
+        self.store.save(_grant(expires_in=0))
+        sent: list[str] = []
+
+        def rejected(request: httpx2.Request) -> httpx2.Response:
+            sent.append(parse_qs(request.content.decode())["refresh_token"][0])
+            return httpx2.Response(400, json={"error": "invalid_grant"})
+
+        self.server.token_handler = rejected
+        with self.assertRaises(LoginRequired):
+            await self._call(self._auth())
+        with self.assertRaises(LoginRequired):
+            await self._call(self._auth())
+        self.assertEqual(sent, [OLD_REFRESH])
 
     async def test_errors_contain_no_secrets(self) -> None:
         def time_out(request: httpx2.Request) -> httpx2.Response:

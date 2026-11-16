@@ -17,8 +17,15 @@ Once login is required, the refresh token that failed is never sent again; only 
 grant with a different refresh token (a new login) clears the state.
 
 If saving a refreshed grant fails, the in-memory grant stays authoritative: a
-store that still holds a refresh token this instance already rotated out is stale,
+store that still holds a refresh token this process already rotated out is stale,
 so the in-memory grant is used (and its save retried) instead of replaying it.
+
+That in-memory state lives in ``_GrantState``, one per token-store path for the
+whole process, not on the auth instance. The hub builds a new client, and so a new
+``McpOAuthAuth``, on every reconnect; per-instance state would forget the rotation
+and replay the rotated-out refresh token from the stale store, which makes the
+provider revoke the grant. A new instance still reads the store on first use, so
+a new login (a refresh token this process never rotated out) is adopted.
 
 Token material never appears in an exception, ``last_error`` or a log record. The
 token endpoint's response body is never logged or quoted either.
@@ -27,7 +34,8 @@ token endpoint's response body is never logged or quoted either.
 import logging
 import re
 import time
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import AsyncGenerator, Callable
 
 import httpx2
@@ -44,6 +52,31 @@ DEFAULT_EXPIRES_IN = 3600.0
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 # The request never left this machine, so the token cannot have been rotated.
 _NOT_SENT_ERRORS = (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout)
+
+
+@dataclass
+class _GrantState:
+    """The authoritative grant state for one token store in this process."""
+
+    grant: OAuthGrant | None = None
+    login_required: bool = False
+    # Refresh token of the grant that required login; never sent again.
+    dead_refresh_token: str | None = None
+    # Refresh tokens this process rotated out. A stored grant holding one is stale
+    # (an earlier save failed) and must never be sent again.
+    rotated_out: set[str] = field(default_factory=set)
+    last_error: str | None = None
+
+
+# Deliberate process-level state, like the shared secret redactor: every
+# ``McpOAuthAuth`` for one store path shares one ``_GrantState`` so a reconnect
+# (a new client and auth) keeps what the previous auth learned. Only the event
+# loop touches it; across processes the store's file lock serializes refreshes.
+_GRANT_STATES: dict[Path, _GrantState] = {}
+
+
+def _grant_state_for(path: Path) -> _GrantState:
+    return _GRANT_STATES.setdefault(path.expanduser().resolve(), _GrantState())
 
 
 class LoginRequired(Exception):
@@ -74,18 +107,18 @@ class McpOAuthAuth(httpx2.Auth):
         self._clock = clock
         self._refresh_margin = refresh_margin
         self._token_transport = token_transport
-        self._grant: OAuthGrant | None = None
-        self._login_required = False
-        # Refresh token of the grant that required login; never sent again.
-        self._dead_refresh_token: str | None = None
-        # Refresh tokens this instance rotated out. A stored grant holding one is
-        # stale (an earlier save failed) and must never be sent again.
-        self._rotated_out: set[str] = set()
-        self.last_error: str | None = None
+        self._state = _grant_state_for(store.path)
+        # This instance has not read the store yet: a new auth (a reconnect) reads
+        # it once, so a login written meanwhile is not hidden by the shared grant.
+        self._synced = False
 
     @property
     def login_required(self) -> bool:
-        return self._login_required
+        return self._state.login_required
+
+    @property
+    def last_error(self) -> str | None:
+        return self._state.last_error
 
     async def async_auth_flow(self, request: httpx2.Request) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         grant = await self._usable_grant()
@@ -110,12 +143,22 @@ class McpOAuthAuth(httpx2.Auth):
         return self._clock() < grant.expires_at - self._refresh_margin
 
     async def _usable_grant(self) -> OAuthGrant:
-        if self._grant is None or self._login_required:
-            self._adopt(self._load())
-        assert self._grant is not None
-        if self._is_valid(self._grant):
-            return self._grant
+        state = self._state
+        if not self._synced or state.grant is None or state.login_required:
+            self._adopt(self._load_current())
+            self._synced = True
+        assert state.grant is not None
+        if self._is_valid(state.grant):
+            return state.grant
         return await self._refresh(stale_access_token=None)
+
+    def _load_current(self) -> OAuthGrant:
+        """The stored grant, or the in-memory one when the store is stale."""
+        grant = self._load()
+        if self._is_stale(grant) and self._state.grant is not None:
+            logger.warning("MCP OAuth: token store holds a rotated-out grant; using the in-memory grant")
+            return self._state.grant
+        return grant
 
     async def _recover_from_401(self, rejected_access_token: str) -> OAuthGrant:
         reloaded = self._load()
@@ -132,18 +175,18 @@ class McpOAuthAuth(httpx2.Auth):
             grant = self._load()
             if self._is_stale(grant):
                 # An earlier save failed: memory holds the newer grant.
-                assert self._grant is not None
+                assert self._state.grant is not None
                 logger.warning("MCP OAuth: token store holds a rotated-out grant; using the in-memory grant")
-                grant = self._grant
+                grant = self._state.grant
                 self._save(grant)
             if self._is_valid(grant) and grant.access_token != stale_access_token:
                 self._adopt(grant)
                 return grant
-            self._grant = grant
+            self._state.grant = grant
             return await self._refresh_locked(grant)
 
     def _is_stale(self, grant: OAuthGrant) -> bool:
-        return grant.refresh_token in self._rotated_out
+        return grant.refresh_token in self._state.rotated_out
 
     def _load(self) -> OAuthGrant:
         """Load the stored grant; a missing, malformed or dead one requires login."""
@@ -155,24 +198,27 @@ class McpOAuthAuth(httpx2.Auth):
         if grant is None:
             self._require_login(None, "no OAuth grant stored; run the login command")
             raise LoginRequired(self.last_error)
-        if self._login_required and grant.refresh_token == self._dead_refresh_token:
+        state = self._state
+        if state.login_required and grant.refresh_token == state.dead_refresh_token:
             raise LoginRequired(self.last_error)
         return grant
 
     def _adopt(self, grant: OAuthGrant) -> None:
         self._on_secret(grant.access_token)
         self._on_secret(grant.refresh_token)
-        self._grant = grant
-        if self._login_required:
+        state = self._state
+        state.grant = grant
+        if state.login_required:
             logger.info("MCP OAuth: a new grant was found; login is no longer required")
-        self._login_required = False
-        self._dead_refresh_token = None
-        self.last_error = None
+        state.login_required = False
+        state.dead_refresh_token = None
+        state.last_error = None
 
     def _require_login(self, grant: OAuthGrant | None, reason: str) -> None:
-        self._login_required = True
-        self._dead_refresh_token = grant.refresh_token if grant is not None else None
-        self.last_error = reason
+        state = self._state
+        state.login_required = True
+        state.dead_refresh_token = grant.refresh_token if grant is not None else None
+        state.last_error = reason
         logger.warning("MCP OAuth: login required: %s", reason)
 
     # -- the refresh POST --------------------------------------------------
@@ -208,7 +254,7 @@ class McpOAuthAuth(httpx2.Auth):
         try:
             return await client.post(url, data=form)
         except _NOT_SENT_ERRORS as exc:
-            self.last_error = f"token endpoint unreachable ({type(exc).__name__})"
+            self._state.last_error = f"token endpoint unreachable ({type(exc).__name__})"
             logger.warning("MCP OAuth: %s", self.last_error)
             raise McpConnectionError(f"OAuth refresh failed: {self.last_error}") from None
         except httpx2.TransportError as exc:
@@ -224,7 +270,7 @@ class McpOAuthAuth(httpx2.Auth):
         detail = f"HTTP {status}" + (f" ({error_code})" if error_code else "")
         transient = status >= 500 or status == 429
         if transient and not after_ambiguous:
-            self.last_error = f"token endpoint unavailable: {detail}"
+            self._state.last_error = f"token endpoint unavailable: {detail}"
             logger.warning("MCP OAuth: refresh failed: %s; keeping current tokens", detail)
             raise McpConnectionError(f"OAuth refresh failed: {detail}")
         if error_code in _TERMINAL_ERRORS:
@@ -257,15 +303,15 @@ class McpOAuthAuth(httpx2.Auth):
         self._on_secret(access_token)
         self._on_secret(refresh_token)
         if refresh_token != grant.refresh_token:
-            self._rotated_out.add(grant.refresh_token)
+            self._state.rotated_out.add(grant.refresh_token)
         refreshed = replace(
             grant,
             access_token=access_token,
             refresh_token=refresh_token,
             expires_at=self._clock() + float(expires_in),
         )
-        self._grant = refreshed
-        self.last_error = None
+        self._state.grant = refreshed
+        self._state.last_error = None
         # A failed save must not fail this request: the tokens are valid, and the
         # in-memory grant stays authoritative until a later save succeeds.
         self._save(refreshed)
