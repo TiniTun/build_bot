@@ -43,11 +43,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[str, McpServerConfig], McpClient]
-# ``(server_id, kind)`` with kind one of the ``NOTICE_*`` values below. The hub
-# logs and swallows its failures.
-NoticeCallback = Callable[[str, str], Awaitable[None]]
+# ``(server_id, kind)`` with kind one of the ``NOTICE_*`` values below; returns
+# True once the notice was delivered. The hub logs and swallows its failures.
+NoticeCallback = Callable[[str, str], Awaitable[bool]]
 NOTICE_LOGIN_REQUIRED = "login_required"
 NOTICE_REFRESH_CAP_SOON = "refresh_cap_soon"
+# An undelivered login-required notice is re-sent from the login-required poll
+# while the incident stays open, at most this often.
+LOGIN_RENOTIFY_SECONDS = 3600.0
 
 # Refresh tokens stop working 180 days after the grant; warn ~14 days earlier.
 REFRESH_CAP_WARN_AFTER_SECONDS = 166 * 86400
@@ -129,6 +132,10 @@ class _ServerRuntime:
     # the reconnect loop only retries once the file changes from this.
     login_store_mtime: float | None = None
     attempt_store_mtime: float | None = None
+    # Outcome of this incident's last login-required notice: None while it is in
+    # flight (or no callback is set), True delivered, False given up on.
+    login_notice_delivered: bool | None = None
+    login_notice_at: float = 0.0
     # ``granted_at`` of the grant already warned about the refresh-token cap.
     refresh_cap_warned_for: float | None = None
 
@@ -300,6 +307,7 @@ class McpHub:
         if runtime.login_required:
             logger.info("MCP server %s login-required incident cleared", runtime.server_id)
         runtime.login_required = False
+        runtime.login_notice_delivered = None
         logger.info(
             "MCP server %s connected (%s tools discovered, %s enabled)",
             runtime.server_id,
@@ -356,27 +364,62 @@ class McpHub:
                     runtime.server_id,
                     runtime.server_id,
                 )
-                self._notify(runtime.server_id, NOTICE_LOGIN_REQUIRED)
+                self._notify_login_required(runtime)
             return
         runtime.state = McpServerState.FAILED if runtime.config.required else McpServerState.DEGRADED
 
     # ---- operator notices ----------------------------------------------
 
-    def _notify(self, server_id: str, kind: str) -> None:
+    def _notify(
+        self, server_id: str, kind: str, on_done: Callable[[bool], None] | None = None
+    ) -> None:
         """Hand a notice to the callback without blocking connection work."""
         callback = self._notice_callback
         if callback is None or self._shutting_down:
             logger.info("MCP notice %s for %s not sent: no notice callback", kind, server_id)
             return
-        task = asyncio.create_task(self._run_notice(callback, server_id, kind), name=f"mcp-notice-{server_id}")
+        task = asyncio.create_task(
+            self._run_notice(callback, server_id, kind, on_done), name=f"mcp-notice-{server_id}"
+        )
         self._notice_tasks.add(task)
         task.add_done_callback(self._notice_tasks.discard)
 
-    async def _run_notice(self, callback: NoticeCallback, server_id: str, kind: str) -> None:
+    async def _run_notice(
+        self,
+        callback: NoticeCallback,
+        server_id: str,
+        kind: str,
+        on_done: Callable[[bool], None] | None,
+    ) -> None:
+        delivered = False
         try:
-            await callback(server_id, kind)
+            delivered = bool(await callback(server_id, kind))
         except Exception:
             logger.exception("MCP notice %s for %s failed", kind, server_id)
+        if on_done is not None:
+            on_done(delivered)
+
+    def _notify_login_required(self, runtime: _ServerRuntime) -> None:
+        """Send this incident's login-required notice and record whether it arrived."""
+        runtime.login_notice_delivered = None
+        runtime.login_notice_at = self._clock()
+
+        def done(delivered: bool) -> None:
+            if runtime.login_required:
+                runtime.login_notice_delivered = delivered
+                if not delivered:
+                    logger.warning("MCP login-required notice for %s was not delivered", runtime.server_id)
+
+        self._notify(runtime.server_id, NOTICE_LOGIN_REQUIRED, on_done=done)
+
+    def _maybe_renotify_login_required(self, runtime: _ServerRuntime) -> None:
+        """Re-send an undelivered notice while the incident is open, at most hourly."""
+        if runtime.login_notice_delivered is not False:
+            return
+        if self._clock() - runtime.login_notice_at < LOGIN_RENOTIFY_SECONDS:
+            return
+        logger.info("Re-sending undelivered MCP login-required notice for %s", runtime.server_id)
+        self._notify_login_required(runtime)
 
     async def stop(self) -> None:
         """Close every client. Safe to call repeatedly and before ``start()``."""
@@ -445,6 +488,7 @@ class McpHub:
                 if self._shutting_down or not runtime.config.enabled:
                     return
                 if _store_mtime(runtime.config) == runtime.login_store_mtime:
+                    self._maybe_renotify_login_required(runtime)
                     continue
                 logger.info("MCP server %s token store changed; reconnecting", runtime.server_id)
             else:

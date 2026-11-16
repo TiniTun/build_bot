@@ -500,11 +500,13 @@ class LifecycleOrderingTests(unittest.IsolatedAsyncioTestCase):
 class _NoticeRecorder:
     """Async notice callback that records ``(server_id, kind)`` pairs."""
 
-    def __init__(self) -> None:
+    def __init__(self, delivered: bool = True) -> None:
         self.notices: list[tuple[str, str]] = []
+        self.delivered = delivered
 
-    async def __call__(self, server_id: str, kind: str) -> None:
+    async def __call__(self, server_id: str, kind: str) -> bool:
         self.notices.append((server_id, kind))
+        return self.delivered
 
 
 class _CountingSleep:
@@ -606,6 +608,38 @@ class HubLoginRequiredTests(unittest.IsolatedAsyncioTestCase):
             await _spin()
             self.assertEqual(hub.state("notion"), McpServerState.LOGIN_REQUIRED)
             self.assertEqual(notices.notices, [("notion", "login_required")] * 2)
+            await hub.stop()
+
+    async def test_undelivered_login_notice_is_resent_at_most_hourly(self) -> None:
+        now = [1_800_000_000.0]
+        client = FakeMcpClient("notion", connect_error=_login_error())
+        notices = _NoticeRecorder(delivered=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(Path(tmp) / "notion.json")}),
+                client_factory=_FactoryRecorder({"notion": client}),
+                clock=lambda: now[0],
+                sleep=_CountingSleep().sleep,
+            )
+            hub.set_notice_callback(notices)
+            await hub.start()
+            await _spin(40)
+            # Many polls within the hour: no re-send yet.
+            self.assertEqual(notices.notices, [("notion", "login_required")])
+
+            now[0] += 3600
+            await _spin(40)
+            self.assertEqual(notices.notices, [("notion", "login_required")] * 2)
+
+            # Delivered this time: never re-sent again for this incident.
+            notices.delivered = True
+            now[0] += 3600
+            await _spin(40)
+            self.assertEqual(len(notices.notices), 3)
+            now[0] += 3600
+            await _spin(40)
+            self.assertEqual(len(notices.notices), 3)
             await hub.stop()
 
     async def test_refresh_cap_warning_once(self) -> None:
