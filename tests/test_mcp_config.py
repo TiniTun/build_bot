@@ -322,6 +322,16 @@ class McpOAuthAndArgumentRuleTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             McpToolPolicy.model_validate({"arguments": {"bogus": 1}})
 
+    def test_nested_argument_rules_parse(self) -> None:
+        policy = McpToolPolicy.model_validate(
+            {"arguments": {"nested": {"pages": {"allowed_keys": ["content"], "nested": {"x": {}}}}}}
+        )
+        pages = policy.arguments.nested["pages"]
+        self.assertEqual(pages.allowed_keys, ["content"])
+        self.assertIn("x", pages.nested)
+        with self.assertRaises(ValidationError):
+            McpToolPolicy.model_validate({"arguments": {"nested": {"pages": {"bogus": 1}}}})
+
     def test_connection_identity_changes_with_auth(self) -> None:
         a = McpServerConfig.model_validate(_oauth_server())
         b = McpServerConfig.model_validate(

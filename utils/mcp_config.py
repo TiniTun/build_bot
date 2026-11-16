@@ -66,6 +66,12 @@ class McpArgumentRules(BaseModel):
     forbidden_values: dict[str, list[Any]] = Field(default_factory=dict)
     forbidden_property_values: dict[str, list[Any]] = Field(default_factory=dict)
     forbid_null_properties: bool = False
+    # Rules for mapping (or list-of-mapping) arguments, keyed by argument name,
+    # e.g. the items of notion-create-pages' ``pages`` list.
+    nested: dict[str, "McpArgumentRules"] = Field(default_factory=dict)
+
+
+McpArgumentRules.model_rebuild()
 
 
 class McpToolPolicy(BaseModel):

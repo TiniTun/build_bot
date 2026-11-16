@@ -198,24 +198,35 @@ def check_arguments(rules: McpArgumentRules, arguments: Mapping[str, Any]) -> st
     """Return a denial reason for ``arguments`` under ``rules``, or None if allowed.
 
     Fails closed: anything the rules cannot evaluate denies the call. Reasons
-    name keys only, never argument values, so they are safe to log.
+    name keys and paths only, never argument values, so they are safe to log.
 
     ``forbidden_values[k]`` matches when the argument equals a listed value, and
     also, for mapping arguments, when any of the mapping's values equals one.
     This covers ``notion-create-pages`` where ``parent`` may be the string
     ``"memory"`` or an object that wraps it (``{"page_id": "memory"}``).
+
+    ``nested[k]`` applies sub-rules to a mapping argument, or to every element of
+    a list argument (a non-mapping element denies). Scalars are left to the outer
+    rules, which run first. Paths look like ``pages[0].is_skill``.
     """
+    return _check(rules, arguments, "")
+
+
+def _check(rules: McpArgumentRules, arguments: Mapping[str, Any], path: str) -> str | None:
+    def at(key: str) -> str:
+        return f"{path}{key}"
+
     if rules.allowed_keys is not None:
         for key in arguments:
             if key not in rules.allowed_keys:
-                return f"argument '{key}' is not permitted"
+                return f"argument '{at(key)}' is not permitted"
 
     for key, allowed in rules.allowed_values.items():
         if key not in arguments:
             continue
         value = arguments[key]
         if not _is_plain_scalar(value) or not any(_matches(value, a) for a in allowed):
-            return f"value of '{key}' is not permitted"
+            return f"value of '{at(key)}' is not permitted"
 
     for key, forbidden in rules.forbidden_values.items():
         if key not in arguments:
@@ -223,19 +234,36 @@ def check_arguments(rules: McpArgumentRules, arguments: Mapping[str, Any]) -> st
         value = arguments[key]
         candidates = list(value.values()) if isinstance(value, Mapping) else [value]
         if any(_matches(c, f) for c in candidates for f in forbidden):
-            return f"value of '{key}' is not permitted"
+            return f"value of '{at(key)}' is not permitted"
 
-    if rules.forbid_null_properties or rules.forbidden_property_values:
-        if "properties" in arguments:
-            props = arguments["properties"]
-            if not isinstance(props, Mapping):
-                return "'properties' must be an object"
-            for name, value in props.items():
-                if rules.forbid_null_properties and value is None:
-                    return f"property '{name}' may not be null"
-                for f in rules.forbidden_property_values.get(name, []):
-                    if _matches(value, f):
-                        return f"value of property '{name}' is not permitted"
+    if (rules.forbid_null_properties or rules.forbidden_property_values) and "properties" in arguments:
+        props = arguments["properties"]
+        if not isinstance(props, Mapping):
+            return f"'{at('properties')}' must be an object"
+        for name, value in props.items():
+            if rules.forbid_null_properties and value is None:
+                return f"property '{at('properties')}.{name}' may not be null"
+            for f in rules.forbidden_property_values.get(name, []):
+                if _matches(value, f):
+                    return f"value of property '{at('properties')}.{name}' is not permitted"
+
+    for key, sub in rules.nested.items():
+        if key not in arguments:
+            continue
+        value = arguments[key]
+        if isinstance(value, Mapping):
+            reason = _check(sub, value, f"{at(key)}.")
+            if reason is not None:
+                return reason
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                if not isinstance(item, Mapping):
+                    return f"'{at(key)}[{index}]' must be an object"
+                reason = _check(sub, item, f"{at(key)}[{index}].")
+                if reason is not None:
+                    return reason
+        elif not _is_plain_scalar(value):
+            return f"'{at(key)}' has an unsupported type"
     return None
 
 

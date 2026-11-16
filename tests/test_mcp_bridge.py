@@ -631,6 +631,10 @@ _CREATE_RULES = {
         "skill",
     ],
     "forbidden_values": {"parent": ["memory"]},
+    "nested": {
+        "pages": {"allowed_keys": ["content", "properties", "preserve_internal_links", "full_width"]},
+        "parent": {"allowed_keys": ["type", "page_id", "database_id", "data_source_id"]},
+    },
 }
 
 
@@ -729,3 +733,36 @@ class ArgumentGuardTests(unittest.IsolatedAsyncioTestCase):
         text = "\n".join(logs.output)
         self.assertNotIn("secret-page-id", text)
         self.assertIn("notion-update-page", text)
+
+    async def test_create_pages_nested_forbidden_keys_denied(self) -> None:
+        for page in ({"is_skill": True}, {"icon": "x"}, {"template_id": "x"}, {"cover": "x"}):
+            raw, client = await self._call("notion-create-pages", _CREATE_RULES, pages=[page])
+            self._assert_denied(raw, client)
+            self.assertIn("pages[0].", json.loads(raw)["error"]["message"])
+
+    async def test_create_pages_second_item_checked(self) -> None:
+        raw, client = await self._call("notion-create-pages", _CREATE_RULES, pages=[{"content": "ok"}, {"icon": "x"}])
+        self._assert_denied(raw, client)
+        self.assertIn("pages[1].icon", json.loads(raw)["error"]["message"])
+
+    async def test_create_pages_teamspace_parent_denied(self) -> None:
+        raw, client = await self._call(
+            "notion-create-pages",
+            _CREATE_RULES,
+            pages=[{"content": "x"}],
+            parent={"teamspace_id": "x"},
+        )
+        self._assert_denied(raw, client)
+
+    async def test_create_pages_non_mapping_item_denied(self) -> None:
+        raw, client = await self._call("notion-create-pages", _CREATE_RULES, pages=["x"])
+        self._assert_denied(raw, client)
+
+    async def test_create_pages_valid_nested_allowed(self) -> None:
+        _, client = await self._call(
+            "notion-create-pages",
+            _CREATE_RULES,
+            pages=[{"properties": {"Name": "t"}, "content": "c"}],
+            parent={"type": "data_source_id", "data_source_id": "d"},
+        )
+        self.assertEqual(len(client.calls), 1)
