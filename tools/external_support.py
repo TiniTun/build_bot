@@ -9,6 +9,7 @@ from provider.external_errors import (
     ProviderInvalidRequestError,
     ProviderNotFoundError,
     ProviderPermissionError,
+    ProviderRateLimitError,
 )
 from tools.base import ToolErrorCode, ToolResult
 
@@ -26,6 +27,12 @@ def provider_exception_to_result(exc: Exception) -> ToolResult:
             ToolErrorCode.PERMISSION_DENIED,
             "The provider denied this request due to insufficient permissions.",
             user_action="Grant the required scopes and try again.",
+        )
+    if isinstance(exc, ProviderRateLimitError):
+        return ToolResult.error(
+            ToolErrorCode.RATE_LIMITED,
+            "The provider is temporarily rate limiting requests.",
+            retryable=True,
         )
     if isinstance(exc, ProviderNotFoundError):
         return ToolResult.error(
