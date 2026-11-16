@@ -243,3 +243,7 @@ class DayPlan(BaseModel):
     unscheduled: list[UnscheduledItem] = Field(default_factory=list)
     mandatory: list[MandatoryEvent] = Field(default_factory=list)
     plan_hash: str = ""
+    # True when the enabled task provider failed to load: the plan then says
+    # so instead of silently showing an empty task section. Not part of the
+    # hash, which covers only what would be written.
+    tasks_unavailable: bool = False

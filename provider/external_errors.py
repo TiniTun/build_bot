@@ -27,3 +27,10 @@ class ProviderNotFoundError(ExternalProviderError):
 
 class ProviderInvalidRequestError(ExternalProviderError):
     """Provider rejected the request as malformed (e.g. HTTP 400)."""
+
+
+class ProviderInvalidResponseError(ExternalProviderError):
+    """Provider answered with a payload whose shape we do not recognize.
+
+    The message names the shape problem only; it never carries row data.
+    """

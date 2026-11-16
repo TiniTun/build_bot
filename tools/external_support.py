@@ -7,6 +7,7 @@ or raw provider messages to the LLM.
 from provider.external_errors import (
     AuthMissingError,
     ProviderInvalidRequestError,
+    ProviderInvalidResponseError,
     ProviderNotFoundError,
     ProviderPermissionError,
     ProviderRateLimitError,
@@ -47,6 +48,12 @@ def provider_exception_to_result(exc: Exception) -> ToolResult:
                 "Provide RFC3339 datetimes with a UTC offset (e.g. "
                 "2026-06-16T10:00:00+10:00), or set a valid 'timezone' in config."
             ),
+        )
+    if isinstance(exc, ProviderInvalidResponseError):
+        # Not retryable: the same call would return the same unexpected shape.
+        return ToolResult.error(
+            ToolErrorCode.PROVIDER_ERROR,
+            "The external provider returned an unexpected response.",
         )
     # Unknown failure: do not surface the raw message (may contain secrets).
     return ToolResult.error(

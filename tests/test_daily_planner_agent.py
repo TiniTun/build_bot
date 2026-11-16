@@ -280,3 +280,82 @@ class TestMcpExposureGateIsolated(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlanSaysTasksUnavailable(unittest.IsolatedAsyncioTestCase):
+    """A task outage must be visible in the plan, not an empty task section."""
+
+    UNAVAILABLE = "tasks unavailable: the task provider did not respond"
+
+    async def _plan_text(self, *, tasks_enabled: bool) -> str:
+        from datetime import date as _date
+        from types import SimpleNamespace
+
+        import tools.planning_tools as pt
+        from core.planning.models import ReadinessSignal
+        from provider.mcp.models import McpCallResult
+        from tools.planning_tools import build_planning_capabilities
+
+        class _Calendar:
+            async def list_day(self, day, timezone, calendar_id=None):
+                return []
+
+        class _Hub:
+            async def call_tool(self, server_id, tool_name, arguments=None):
+                # Valid JSON, wrong shape: the provider must refuse it.
+                return McpCallResult(server_id=server_id, tool_name=tool_name,
+                                     text_blocks=('{"rows": []}',))
+
+        async def _green(context_, day):
+            return ReadinessSignal(verdict="green", source="whoop",
+                                   retry_eligible=False, note="ok")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            patterns = workspace / "planning" / "day_patterns.yaml"
+            patterns.parent.mkdir(parents=True)
+            patterns.write_text(yaml.safe_dump({
+                "version": 1,
+                "defaults": {
+                    "schedulable_window": {"start": "06:00", "end": "22:00"},
+                    "buffer_minutes": 10,
+                    "max_scheduled_minutes": 180,
+                    "min_free_minutes": 60,
+                    "min_block_minutes": 20,
+                },
+                "weekdays": {},
+            }))
+            context = make_context(workspace)
+            context.config.planning = PlanningConfig(
+                enabled=True, mode="shadow", patterns_path=patterns)
+            context.config.external_tools.tasks = TasksProviderConfig(
+                enabled=tasks_enabled, provider="notion", mcp_server="notion",
+                data_source_id="0b2c30e0-3aa2-47bb-85b7-69a1032cca73",
+            )
+            context.mcp_hub = _Hub()
+            session = SimpleNamespace(
+                shared_context=context,
+                state=SimpleNamespace(suppress_final_output=False),
+            )
+            orig_calendar, orig_readiness = pt.get_calendar_provider, pt._readiness
+            pt.get_calendar_provider = lambda config: _Calendar()
+            pt._readiness = _green
+            try:
+                pairs = build_planning_capabilities(context.config)
+                tool_obj = next(t for cap, t in pairs
+                                if cap.id == "planning.build_day_plan")
+                return await tool_obj.execute(
+                    session=session, date=_date(2026, 11, 16).isoformat())
+            finally:
+                pt.get_calendar_provider = orig_calendar
+                pt._readiness = orig_readiness
+
+    async def test_plan_says_tasks_unavailable_on_parse_error(self):
+        with self.assertLogs("tools.planning_tools", level="WARNING") as logs:
+            text = await self._plan_text(tasks_enabled=True)
+        self.assertIn(self.UNAVAILABLE, text)
+        self.assertNotIn("todoist", "\n".join(logs.output).lower())
+
+    async def test_plan_is_silent_about_tasks_when_the_domain_is_off(self):
+        text = await self._plan_text(tasks_enabled=False)
+        self.assertNotIn(self.UNAVAILABLE, text)

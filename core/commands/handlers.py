@@ -397,7 +397,9 @@ class ConfirmCommand(Command):
         # Prefer a dedicated confirmed executor for provider mutations. It runs
         # the real mutation directly, so /confirm never re-invokes the proposal
         # tool (which would only record another pending action).
-        executor = build_confirmed_executor_registry(config).get(capability_id)
+        executor = build_confirmed_executor_registry(
+            config, session.shared_context.mcp_hub
+        ).get(capability_id)
         if executor is not None:
             # Delete before executing: a provider call that may have mutated must
             # not remain confirmable and risk a second mutation.

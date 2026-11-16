@@ -30,6 +30,7 @@ from tools.external_support import provider_exception_to_result
 
 if TYPE_CHECKING:
     from core.agent import AgentSession
+    from provider.mcp.hub import McpHub
     from utils.config import Config
 
 
@@ -37,6 +38,34 @@ DELETE_CAPABILITY_ID = "tasks.delete"
 BULK_UPDATE_CAPABILITY_ID = "tasks.bulk_update"
 
 _REQUIRED_CONFIG = ["external_tools.tasks"]
+
+# The quick-add and search descriptions promise provider-specific syntax, so
+# they are chosen by provider; the other task tools describe both alike.
+_QUICK_ADD_DESCRIPTIONS = {
+    "todoist": (
+        "Quickly add a task from natural language (Todoist quick-add syntax, "
+        "e.g. 'Pay rent tomorrow at 9am #Finance p1')."
+    ),
+    "notion": (
+        "Quickly add a task to the Inbox. The text becomes the task title as-is: "
+        "no date, priority or project is parsed from it (set those afterwards "
+        "with tasks_update)."
+    ),
+}
+_SEARCH_DESCRIPTIONS = {
+    "todoist": (
+        "Search tasks using a Todoist filter query "
+        "(e.g. 'today & @work', '#Project', 'p1')."
+    ),
+    "notion": (
+        "Search open tasks whose name contains the given text "
+        "(case-insensitive substring match, not a filter language)."
+    ),
+}
+_SEARCH_FILTER_DESCRIPTIONS = {
+    "todoist": "Todoist filter query.",
+    "notion": "Text to find in task names.",
+}
 
 
 def _format_task(task: Task) -> str:
@@ -56,19 +85,18 @@ def _format_tasks(tasks: list[Task], empty: str) -> str:
 
 def build_task_capabilities(
     config: "Config",
+    hub: "McpHub | None" = None,
 ) -> list[tuple[CapabilityDef, BaseTool]]:
     """Build task capability/tool pairs, or [] when tasks are disabled."""
     if not config.external_tools.tasks.enabled:
         return []
 
-    provider = get_task_provider(config)
+    provider = get_task_provider(config, hub)
+    style = "notion" if config.external_tools.tasks.provider == "notion" else "todoist"
 
     @tool(
         name="tasks_quick_add",
-        description=(
-            "Quickly add a task from natural language (Todoist quick-add syntax, "
-            "e.g. 'Pay rent tomorrow at 9am #Finance p1')."
-        ),
+        description=_QUICK_ADD_DESCRIPTIONS[style],
         parameters={
             "type": "object",
             "properties": {
@@ -155,14 +183,14 @@ def build_task_capabilities(
 
     @tool(
         name="tasks_search",
-        description=(
-            "Search tasks using a Todoist filter query "
-            "(e.g. 'today & @work', '#Project', 'p1')."
-        ),
+        description=_SEARCH_DESCRIPTIONS[style],
         parameters={
             "type": "object",
             "properties": {
-                "filter": {"type": "string", "description": "Todoist filter query."},
+                "filter": {
+                    "type": "string",
+                    "description": _SEARCH_FILTER_DESCRIPTIONS[style],
+                },
                 "limit": {
                     "type": "integer",
                     "description": "Max tasks to return.",
@@ -493,6 +521,7 @@ def build_task_capabilities(
 
 def build_task_confirmed_executors(
     config: "Config",
+    hub: "McpHub | None" = None,
 ) -> dict[str, ConfirmedExecutor]:
     """Confirmed executors for task mutations, or {} when tasks are disabled.
 
@@ -503,7 +532,7 @@ def build_task_confirmed_executors(
     if not config.external_tools.tasks.enabled:
         return {}
 
-    provider = get_task_provider(config)
+    provider = get_task_provider(config, hub)
 
     async def delete_confirmed(session: "AgentSession", payload: dict) -> str:
         task_id = payload.get("task_id")

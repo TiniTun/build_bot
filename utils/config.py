@@ -208,6 +208,13 @@ class TasksProviderConfig(BaseModel):
     # such estimates assumed so a summary can say so rather than implying the
     # user stated it.
     default_duration_minutes: int = Field(default=30, gt=0, le=480)
+    # provider == "notion": the MCP server id the tasks live behind, and the
+    # bare id of the Tasks data source (the provider builds `collection://`).
+    # The id ends up as the SQL table name, so it is pinned to an id shape.
+    mcp_server: str | None = None
+    data_source_id: str | None = Field(
+        default=None, pattern=r"^[0-9a-fA-F]{8}-?(?:[0-9a-fA-F]{4}-?){3}[0-9a-fA-F]{12}$"
+    )
 
 
 class ExternalToolsConfig(BaseModel):

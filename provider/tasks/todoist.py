@@ -27,6 +27,7 @@ from provider.tasks.base import (
     BulkTaskUpdateRequest,
     Task,
     TaskUpdateRequest,
+    apply_bulk_update,
     parse_duration_label,
 )
 
@@ -159,15 +160,4 @@ class TodoistTaskProvider:
 
     async def bulk_update(self, request: BulkTaskUpdateRequest) -> int:
         """Apply one operation across every task id, returning the count done."""
-        count = 0
-        for task_id in request.task_ids:
-            if request.operation == "complete":
-                await self.complete(task_id)
-            elif request.operation == "delete":
-                await self.delete(task_id)
-            else:  # "update"
-                await self.update(
-                    TaskUpdateRequest(task_id=task_id, **request.fields)
-                )
-            count += 1
-        return count
+        return await apply_bulk_update(self, request)

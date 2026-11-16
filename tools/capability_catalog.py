@@ -46,6 +46,7 @@ from tools.websearch_tool import create_websearch_tool
 if TYPE_CHECKING:
     from core.agent_loader import AgentDef
     from core.context import SharedContext
+    from provider.mcp.hub import McpHub
     from utils.config import Config
 
 
@@ -235,7 +236,7 @@ def build_capability_registry(
         config, calendar_places_provider
     ):
         registry.register(capability, tool)
-    for capability, tool in build_task_capabilities(config):
+    for capability, tool in build_task_capabilities(config, context.mcp_hub):
         registry.register(capability, tool)
     for capability, tool in build_memory_capabilities(config):
         registry.register(capability, tool)
@@ -253,7 +254,9 @@ def build_capability_registry(
     return registry
 
 
-def build_confirmed_executor_registry(config: "Config") -> ConfirmedExecutorRegistry:
+def build_confirmed_executor_registry(
+    config: "Config", hub: "McpHub | None" = None
+) -> ConfirmedExecutorRegistry:
     """Assemble confirmed executors for mutation capabilities (post-confirm path).
 
     Keyed by dotted capability id; ``ConfirmCommand`` looks an action's capability
@@ -264,6 +267,6 @@ def build_confirmed_executor_registry(config: "Config") -> ConfirmedExecutorRegi
     registry = ConfirmedExecutorRegistry()
     registry.merge(build_email_confirmed_executors(config))
     registry.merge(build_calendar_confirmed_executors(config))
-    registry.merge(build_task_confirmed_executors(config))
+    registry.merge(build_task_confirmed_executors(config, hub))
     registry.merge(build_planning_confirmed_executors(config))
     return registry

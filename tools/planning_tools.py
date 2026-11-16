@@ -41,6 +41,9 @@ HEALTH_SERVER_ID = "health_planner"
 READINESS_TOOL = "get_daily_readiness"
 STATUS_TOOL = "whoop_status"
 
+# Matches the rest of `_render_plan`, which is English.
+TASKS_UNAVAILABLE_LINE = "tasks unavailable: the task provider did not respond"
+
 _WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
@@ -135,13 +138,19 @@ async def _compose(session: "AgentSession", day: str) -> "DayPlan":
     # only ever subtracted from free time.
     agenda = await calendar.list_day(day, timezone)
 
-    tasks_provider = get_task_provider(config)
+    tasks_provider = get_task_provider(
+        config, getattr(session.shared_context, "mcp_hub", None)
+    )
+    tasks_unavailable = False
     try:
         today = await tasks_provider.list_today(limit=50)
         overdue = await tasks_provider.list_overdue(limit=50)
     except Exception:  # noqa: BLE001 - a task outage must not lose the day
-        logger.warning("todoist unavailable; planning without tasks", exc_info=True)
+        logger.warning("task provider unavailable; planning without tasks", exc_info=True)
         today, overdue = [], []
+        # Only an enabled domain can be "unavailable"; a disabled one is a
+        # deliberate absence and stays silent.
+        tasks_unavailable = config.external_tools.tasks.enabled
 
     overdue_ids = {task.id for task in overdue}
     # Overdue wins on duplicates; select_candidates orders them first anyway.
@@ -150,11 +159,14 @@ async def _compose(session: "AgentSession", day: str) -> "DayPlan":
 
     signal = await _readiness(session.shared_context, day)
 
-    return build_day_plan(
+    plan = build_day_plan(
         day=day, timezone=timezone, agenda=agenda, tasks=list(merged.values()),
         patterns=activities, limits=limits, signal=signal,
         weekday=weekday, overdue_ids=overdue_ids,
     )
+    if tasks_unavailable:
+        plan = plan.model_copy(update={"tasks_unavailable": True})
+    return plan
 
 
 def _render(sync: SyncPlan) -> str:
@@ -182,6 +194,8 @@ def _render_plan(plan: "DayPlan") -> str:
     never the server's `reasons`.
     """
     lines = [f"readiness: {plan.readiness.verdict} — {plan.readiness.note}"]
+    if plan.tasks_unavailable:
+        lines.append(TASKS_UNAVAILABLE_LINE)
     for event in plan.events:
         assumed = " (duration assumed)" if event.duration_assumed else ""
         lines.append(

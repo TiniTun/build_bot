@@ -1,7 +1,9 @@
 """Tasks provider protocol, data models, and a null provider.
 
 ``get_task_provider`` selects ``TodoistTaskProvider`` when the tasks domain is
-enabled with ``provider == "todoist"``; otherwise it returns a
+enabled with ``provider == "todoist"``, or ``NotionTaskProvider`` with
+``provider == "notion"`` (which also needs the ``McpHub``, ``mcp_server`` and
+``data_source_id``); otherwise it returns a
 ``NullTaskProvider`` that raises ``AuthMissingError`` so tools surface a stable
 ``AUTH_MISSING`` error instead of failing opaquely.
 
@@ -9,6 +11,7 @@ enabled with ``provider == "todoist"``; otherwise it returns a
 the confirmed-execution path; the proposal tools never call them directly.
 """
 
+import logging
 import re
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -17,7 +20,10 @@ from pydantic import BaseModel, Field
 from provider.external_errors import AuthMissingError
 
 if TYPE_CHECKING:
+    from provider.mcp.hub import McpHub
     from utils.config import Config
+
+logger = logging.getLogger(__name__)
 
 # A duration label is the WHOLE label, never a substring: `sprint-30max` is a
 # project name, not half an hour. Minutes must be positive; `0m` is a typo, not
@@ -119,6 +125,22 @@ class TaskProvider(Protocol):
     async def bulk_update(self, request: BulkTaskUpdateRequest) -> int: ...
 
 
+async def apply_bulk_update(
+    provider: TaskProvider, request: BulkTaskUpdateRequest
+) -> int:
+    """Apply one operation across every task id, returning the count done."""
+    count = 0
+    for task_id in request.task_ids:
+        if request.operation == "complete":
+            await provider.complete(task_id)
+        elif request.operation == "delete":
+            await provider.delete(task_id)
+        else:  # "update"
+            await provider.update(TaskUpdateRequest(task_id=task_id, **request.fields))
+        count += 1
+    return count
+
+
 class NullTaskProvider:
     """Placeholder provider that reports missing authentication."""
 
@@ -150,7 +172,7 @@ class NullTaskProvider:
         raise AuthMissingError("tasks provider is not configured")
 
 
-def get_task_provider(config: "Config") -> TaskProvider:
+def get_task_provider(config: "Config", hub: "McpHub | None" = None) -> TaskProvider:
     """Return the configured task provider, or a null provider if unavailable."""
     external = config.external_tools.tasks
     if not external.enabled:
@@ -159,5 +181,15 @@ def get_task_provider(config: "Config") -> TaskProvider:
         from provider.tasks.todoist import TodoistTaskProvider
 
         return TodoistTaskProvider(config, external)
+    if external.provider == "notion":
+        if hub is None or not external.mcp_server or not external.data_source_id:
+            logger.warning(
+                "notion tasks need the MCP hub, mcp_server and data_source_id; "
+                "tasks are unavailable"
+            )
+            return NullTaskProvider()
+        from provider.tasks.notion import NotionTaskProvider
+
+        return NotionTaskProvider(config, external, hub)
     # Unknown/unspecified provider: behave as auth-missing rather than raising.
     return NullTaskProvider()
