@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 from provider.mcp.client import McpClient, StreamableHttpMcpClient
 from provider.mcp.errors import (
     McpConfigError,
+    McpConnectionError,
     McpError,
     McpLoginRequiredError,
     McpNotConnectedError,
@@ -736,7 +737,11 @@ class McpHub:
             self._schedule_reconnect(runtime)
             return
         client = runtime.client
-        if isinstance(exc, McpNotConnectedError) or (client is not None and not client.is_connected):
+        # A transport failure can leave the SDK session object alive but unusable
+        # (e.g. a token refresh failing mid-request closes the stream while
+        # ``is_connected`` stays true), so it counts as a lost connection too.
+        lost = isinstance(exc, (McpNotConnectedError, McpConnectionError))
+        if lost or (client is not None and not client.is_connected):
             runtime.state = McpServerState.DEGRADED
             self._schedule_reconnect(runtime)
 

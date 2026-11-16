@@ -11,16 +11,21 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import httpx2
+
 import core.agent as agent_module
 from core.agent import Agent
 from core.events import CliEventSource, InboundEvent, OutboundEvent
 from provider.llm.base import LLMToolCall
 from provider.mcp.client import StreamableHttpMcpClient
-from provider.mcp.errors import McpConnectionError
-from provider.mcp.hub import McpHub
+from provider.mcp.errors import McpConnectionError, McpError
+from provider.mcp.hub import McpHub, McpServerState
+from provider.mcp.oauth import McpOAuthAuth
+from provider.mcp.oauth_store import OAuthGrant, OAuthStore
 from server.agent_worker import AgentWorker
 from tests.helpers import make_context, make_workspace, write_definition
-from tests.mcp_fakes import FakeMcpClient, FakeMcpHttpServer, fake_tool, tool_spec
+from tests.mcp_fakes import FakeMcpClient, FakeMcpHttpServer, fake_tool, text_result, tool_spec
+from tests.test_mcp_hub import _config, _oauth_server
 from utils.mcp_config import McpConfig
 
 TOKEN = "integration-token-5c2d9a"
@@ -370,6 +375,84 @@ class ShutdownIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 await context.mcp_hub.start()
             await context.mcp_hub.stop()
             await context.mcp_hub.stop()
+
+
+class OAuthSessionRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    """Real client + OAuth auth + hub: a failed token refresh mid-session."""
+
+    async def test_token_endpoint_503_leaves_connected_and_recovers(self) -> None:
+        now = [1_800_000_000.0]
+        token_mode = {"status": 200}
+        server = FakeMcpHttpServer(tools=[tool_spec("alpha")], call_handler=lambda name, args: text_result("ok"))
+
+        def token_handler(request: httpx2.Request) -> httpx2.Response:
+            if token_mode["status"] != 200:
+                return httpx2.Response(token_mode["status"], text="unavailable")
+            return httpx2.Response(
+                200,
+                json={"access_token": "ACCESS-TOKEN-2222", "refresh_token": "REFRESH-TOKEN-2222", "expires_in": 28_800},
+            )
+
+        async def fast_sleep(seconds: float) -> None:
+            await asyncio.sleep(0.01)
+
+        async def wait_for(state: McpServerState) -> None:
+            for _ in range(300):
+                if hub.state("notion") is state:
+                    return
+                await asyncio.sleep(0.01)
+            self.fail(f"notion never reached {state.value}; it is {hub.state('notion').value}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            store_path = Path(tmp) / "secrets" / "notion.json"
+            OAuthStore(store_path).save(
+                OAuthGrant(
+                    client_id="cid",
+                    client_secret=None,
+                    redirect_uri="http://127.0.0.1:33418/callback",
+                    token_endpoint="https://notion.example/token",
+                    resource="https://notion.example/mcp",
+                    access_token="ACCESS-TOKEN-1111",
+                    refresh_token="REFRESH-TOKEN-1111",
+                    expires_at=now[0] + 3600,
+                    granted_at=now[0],
+                )
+            )
+
+            def factory(server_id, server_config):
+                client = StreamableHttpMcpClient(server_id, server_config, env={}, transport_factory=server.transport)
+                client._oauth_auth = McpOAuthAuth(
+                    OAuthStore(server_config.auth.token_store),
+                    on_secret=client._redactor.add,
+                    clock=lambda: now[0],
+                    token_transport=httpx2.MockTransport(token_handler),
+                )
+                return client
+
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(store_path, connect_timeout_seconds=5.0)}),
+                client_factory=factory,
+                sleep=fast_sleep,
+            )
+            try:
+                await hub.start()
+                self.assertEqual(hub.state("notion"), McpServerState.CONNECTED)
+                self.assertEqual((await hub.call_tool("notion", "alpha", {})).text_blocks, ("ok",))
+
+                # The access token expires; the refresh POST gets a 503 mid-call.
+                now[0] += 3600
+                token_mode["status"] = 503
+                with self.assertRaises(McpError):
+                    await hub.call_tool("notion", "alpha", {})
+                self.assertIsNot(hub.state("notion"), McpServerState.CONNECTED)
+
+                # The token endpoint recovers: the reconnect loop restores the session.
+                token_mode["status"] = 200
+                await wait_for(McpServerState.CONNECTED)
+                self.assertEqual((await hub.call_tool("notion", "alpha", {})).text_blocks, ("ok",))
+            finally:
+                await hub.stop()
 
 
 if __name__ == "__main__":
