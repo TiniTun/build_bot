@@ -155,9 +155,14 @@ class McpOAuthAuth(httpx2.Auth):
     def _load_current(self) -> OAuthGrant:
         """The stored grant, or the in-memory one when the store is stale."""
         grant = self._load()
-        if self._is_stale(grant) and self._state.grant is not None:
+        state = self._state
+        if self._is_stale(grant) and state.grant is not None:
+            if state.login_required and state.grant.refresh_token == state.dead_refresh_token:
+                # The in-memory grant died and the store only holds an older,
+                # rotated-out one: neither may be sent; only a new login helps.
+                raise LoginRequired(self.last_error)
             logger.warning("MCP OAuth: token store holds a rotated-out grant; using the in-memory grant")
-            return self._state.grant
+            return state.grant
         return grant
 
     async def _recover_from_401(self, rejected_access_token: str) -> OAuthGrant:

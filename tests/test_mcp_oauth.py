@@ -518,6 +518,45 @@ class McpOAuthAuthTests(unittest.IsolatedAsyncioTestCase):
             await self._call(self._auth())
         self.assertEqual(sent, [OLD_REFRESH])
 
+    async def test_dead_in_memory_grant_is_never_resent_while_the_store_is_stale(self) -> None:
+        store = _FlakyStore(self.store.path)
+        store.save(_grant(expires_in=100))
+        sent: list[str] = []
+        rotate = _rotating_token_handler(sent)
+        self.server.token_handler = rotate
+        store.fail = True
+        await self._call(self._auth(store))
+        self.assertEqual(sent, [OLD_REFRESH])
+
+        def rejected(request: httpx2.Request) -> httpx2.Response:
+            sent.append(parse_qs(request.content.decode())["refresh_token"][0])
+            return httpx2.Response(400, json={"error": "invalid_grant"})
+
+        # refresh-1 dies; the store still holds the rotated-out OLD_REFRESH.
+        self.server.token_handler = rejected
+        self.now += 28_800
+        auth = self._auth(store)
+        with self.assertRaises(LoginRequired):
+            await self._call(auth)
+        self.assertEqual(sent, [OLD_REFRESH, "refresh-1-SECRET"])
+
+        with self.assertRaises(LoginRequired):
+            await self._call(auth)
+        with self.assertRaises(LoginRequired):
+            await self._call(self._auth(store))
+        self.assertEqual(sent, [OLD_REFRESH, "refresh-1-SECRET"])
+
+        # A fresh mcp-login is still adopted.
+        store.fail = False
+        store.save(
+            replace(_grant(expires_in=60_000, access="login-access-SECRET", refresh="login-refresh-SECRET"), granted_at=NOW)
+        )
+        self.now = NOW
+        response = await self._call(self._auth(store))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.server.mcp_bearers()[-1], "Bearer login-access-SECRET")
+        self.assertEqual(sent, [OLD_REFRESH, "refresh-1-SECRET"])
+
     async def test_errors_contain_no_secrets(self) -> None:
         def time_out(request: httpx2.Request) -> httpx2.Response:
             raise httpx2.ReadTimeout(f"timed out {OLD_REFRESH}", request=request)

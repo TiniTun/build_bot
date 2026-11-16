@@ -360,7 +360,7 @@ class McpHub:
             if not runtime.login_required:
                 runtime.login_required = True
                 logger.warning(
-                    "MCP server %s needs a new login: run `build-bot mcp-login %s`",
+                    "MCP server %s needs a new login: run `build-bot --workspace ./default_workspace mcp-login %s`",
                     runtime.server_id,
                     runtime.server_id,
                 )
