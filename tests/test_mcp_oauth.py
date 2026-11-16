@@ -103,6 +103,30 @@ class _RacingStore(OAuthStore):
             yield
 
 
+class _FlakyStore(OAuthStore):
+    """Store whose ``save`` fails while ``fail`` is set (a full or read-only disk)."""
+
+    fail = False
+
+    def save(self, grant: OAuthGrant) -> None:
+        if self.fail:
+            raise OSError(28, "No space left on device")
+        super().save(grant)
+
+
+def _rotating_token_handler(sent: list[str]) -> Callable[[httpx2.Request], httpx2.Response]:
+    """Token endpoint that records each refresh token and rotates to ``refresh-N``."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.append(parse_qs(request.content.decode())["refresh_token"][0])
+        n = len(sent)
+        return httpx2.Response(
+            200, json={"access_token": f"access-{n}-SECRET", "refresh_token": f"refresh-{n}-SECRET", "expires_in": 28_800}
+        )
+
+    return handler
+
+
 class McpOAuthAuthTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.tmp = Path(tempfile.mkdtemp())
@@ -359,6 +383,50 @@ class McpOAuthAuthTests(unittest.IsolatedAsyncioTestCase):
         )
 
     # -- redaction ---------------------------------------------------------
+
+    # -- store write failures ----------------------------------------------
+
+    async def test_failed_save_never_replays_the_rotated_out_refresh_token(self) -> None:
+        store = _FlakyStore(self.store.path)
+        store.save(_grant(expires_in=100))
+        sent: list[str] = []
+        self.server.token_handler = _rotating_token_handler(sent)
+        auth = self._auth(store)
+
+        store.fail = True
+        response = await self._call(auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.server.mcp_bearers(), ["Bearer access-1-SECRET"])
+        self.assertIn("could not be saved", "\n".join(self.logs.lines))
+        self._assert_no_secrets("\n".join(self.logs.lines))
+
+        store.fail = False
+        self.now += 28_800
+        response = await self._call(auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sent, [OLD_REFRESH, "refresh-1-SECRET"])
+        self.assertEqual(self.server.mcp_bearers()[-1], "Bearer access-2-SECRET")
+        saved = store.load()
+        assert saved is not None
+        self.assertEqual(saved.refresh_token, "refresh-2-SECRET")
+
+    async def test_401_with_stale_store_refreshes_from_memory(self) -> None:
+        store = _FlakyStore(self.store.path)
+        store.save(_grant(expires_in=100))
+        sent: list[str] = []
+        self.server.token_handler = _rotating_token_handler(sent)
+        auth = self._auth(store)
+
+        store.fail = True
+        await self._call(auth)
+        store.fail = False
+        self.server.mcp_handler = lambda request: (
+            httpx2.Response(401) if request.headers["Authorization"] == "Bearer access-1-SECRET" else _mcp_ok(request)
+        )
+        response = await self._call(auth)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sent, [OLD_REFRESH, "refresh-1-SECRET"])
+        self.assertEqual(self.server.mcp_bearers()[-1], "Bearer access-2-SECRET")
 
     async def test_errors_contain_no_secrets(self) -> None:
         def time_out(request: httpx2.Request) -> httpx2.Response:
