@@ -359,3 +359,78 @@ class TestPlanSaysTasksUnavailable(unittest.IsolatedAsyncioTestCase):
     async def test_plan_is_silent_about_tasks_when_the_domain_is_off(self):
         text = await self._plan_text(tasks_enabled=False)
         self.assertNotIn(self.UNAVAILABLE, text)
+
+
+class TestOutagePlanDeletesNothing(unittest.TestCase):
+    """A task outage must not sync away the task blocks already on the calendar."""
+
+    def test_auto_sync_keeps_task_blocks_during_outage(self):
+        import asyncio
+        import json as _json
+
+        import tools.planning_tools as pt
+        from core.planning.sync import marker
+        from provider.calendar.base import CalendarEvent
+        from provider.mcp.models import McpCallResult
+        from tests.test_planning_tools import (
+            _GREEN_SIGNAL, DATE, DEFAULT_CALENDAR_ID, _build_env, _RecordingProvider,
+        )
+        from tools.planning_tools import SYNC_CAPABILITY_ID, build_planning_capabilities
+
+        task_block = CalendarEvent(
+            id="task-evt", title="Write the provider",
+            start=f"{DATE}T07:00:00+00:00", end=f"{DATE}T07:30:00+00:00",
+            private_properties=marker(DATE, "task:40121f6ce43981129943fd9117c4f9c3"),
+        )
+        provider = _RecordingProvider(plan_events=[task_block])
+
+        class _Hub:
+            async def call_tool(self, server_id, tool_name, arguments=None):
+                return McpCallResult(server_id=server_id, tool_name=tool_name,
+                                     text_blocks=(_json.dumps({"rows": []}),))
+
+        async def _green(context_, day):
+            return _GREEN_SIGNAL
+
+        async def _inner():
+            with tempfile.TemporaryDirectory() as tmp:
+                context, session = _build_env(
+                    tmp, mode="auto", planning_calendar_id=DEFAULT_CALENDAR_ID)
+                context.config.external_tools.tasks = TasksProviderConfig(
+                    enabled=True, provider="notion", mcp_server="notion",
+                    data_source_id="0b2c30e0-3aa2-47bb-85b7-69a1032cca73",
+                )
+                context.mcp_hub = _Hub()
+                orig_calendar, orig_readiness = pt.get_calendar_provider, pt._readiness
+                pt.get_calendar_provider = lambda config: provider
+                pt._readiness = _green
+                try:
+                    pairs = build_planning_capabilities(context.config)
+                    tool_obj = next(t for cap, t in pairs if cap.id == SYNC_CAPABILITY_ID)
+                    return await tool_obj.execute(session=session, date=DATE)
+                finally:
+                    pt.get_calendar_provider = orig_calendar
+                    pt._readiness = orig_readiness
+
+        with self.assertLogs("tools.planning_tools", level="WARNING") as logs:
+            result = asyncio.run(_inner())
+        self.assertEqual(provider.deleted, [])
+        self.assertIn("0 removed", result)
+        self.assertTrue(any("keeping 1 task block" in line for line in logs.output))
+
+    def test_without_outage_a_stale_task_block_is_still_removed(self):
+        from core.planning.models import DayPlan
+        from core.planning.sync import marker
+        from provider.calendar.base import CalendarEvent
+        from tests.test_planning_tools import _GREEN_SIGNAL, DATE
+        from tools.planning_tools import _sync_diff
+
+        stale = CalendarEvent(
+            id="task-evt", title="Done already",
+            start=f"{DATE}T07:00:00+00:00", end=f"{DATE}T07:30:00+00:00",
+            private_properties=marker(DATE, "task:abc"),
+        )
+        plan = DayPlan(date=DATE, timezone="UTC", readiness=_GREEN_SIGNAL)
+        self.assertEqual(len(_sync_diff(plan, [stale], DATE).deletes), 1)
+        outage = plan.model_copy(update={"tasks_unavailable": True})
+        self.assertEqual(_sync_diff(outage, [stale], DATE).deletes, [])

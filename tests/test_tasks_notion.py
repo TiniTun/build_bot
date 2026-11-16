@@ -34,6 +34,8 @@ FIXTURE = Path(__file__).parent / "fixtures" / "notion_query_tasks.json"
 DATA_SOURCE_ID = "0b2c30e0-3aa2-47bb-85b7-69a1032cca73"
 COLLECTION = f"collection://{DATA_SOURCE_ID}"
 QUERY_TOOL = "notion-query-data-sources"
+PAGE = "40121f6ce43981129943fd9117c4f9c3"
+PAGE_B = "40321f6ce439814b9f1adb0de9964098"
 
 
 def _fixture_text() -> str:
@@ -266,12 +268,12 @@ class NotionWriteTests(unittest.IsolatedAsyncioTestCase):
     async def test_update_maps_fields(self) -> None:
         hub = _FakeHub()
         task = await _provider(hub).update(TaskUpdateRequest(
-            task_id="abc", content="Renamed", due_string="2026-11-20", priority=4,
+            task_id=PAGE, content="Renamed", due_string="2026-11-20", priority=4,
         ))
         server, tool, args = hub.calls[-1]
         self.assertEqual((server, tool), ("notion", "notion-update-page"))
         self.assertEqual(args, {
-            "page_id": "abc",
+            "page_id": PAGE,
             "command": "update_properties",
             "properties": {
                 "Name": "Renamed",
@@ -280,20 +282,20 @@ class NotionWriteTests(unittest.IsolatedAsyncioTestCase):
                 "Priority": "P1",
             },
         })
-        self.assertEqual(task.id, "abc")
+        self.assertEqual(task.id, PAGE)
         self.assertEqual(task.content, "Renamed")
 
     async def test_priority_mapping_in_update(self) -> None:
         for priority, label in ((4, "P1"), (3, "P2"), (2, "P3"), (1, "P4")):
             hub = _FakeHub()
             await _provider(hub).update(
-                TaskUpdateRequest(task_id="abc", priority=priority))
+                TaskUpdateRequest(task_id=PAGE, priority=priority))
             self.assertEqual(hub.calls[-1][2]["properties"], {"Priority": label})
 
     async def test_update_due_datetime(self) -> None:
         hub = _FakeHub()
         await _provider(hub).update(TaskUpdateRequest(
-            task_id="abc", due_string="2026-11-20T09:30:00+10:00"))
+            task_id=PAGE, due_string="2026-11-20T09:30:00+10:00"))
         props = hub.calls[-1][2]["properties"]
         self.assertEqual(props["date:Due:start"], "2026-11-20T09:30:00+10:00")
         self.assertEqual(props["date:Due:is_datetime"], 1)
@@ -303,7 +305,7 @@ class NotionWriteTests(unittest.IsolatedAsyncioTestCase):
             hub = _FakeHub()
             with self.assertRaises(ProviderInvalidRequestError) as ctx:
                 await _provider(hub).update(
-                    TaskUpdateRequest(task_id="abc", content="x", **field))
+                    TaskUpdateRequest(task_id=PAGE, content="x", **field))
             self.assertIn("not supported by the notion provider", str(ctx.exception))
             self.assertEqual(hub.calls, [])
 
@@ -312,37 +314,65 @@ class NotionWriteTests(unittest.IsolatedAsyncioTestCase):
             hub = _FakeHub()
             with self.assertRaises(ProviderInvalidRequestError):
                 await _provider(hub).update(
-                    TaskUpdateRequest(task_id="abc", due_string=bad))
+                    TaskUpdateRequest(task_id=PAGE, due_string=bad))
             self.assertEqual(hub.calls, [])
 
     async def test_update_error_result_raises(self) -> None:
         hub = _FakeHub({"notion-update-page": _result(
             "notion-update-page", "nope", is_error=True)})
         with self.assertRaises(ProviderInvalidResponseError):
-            await _provider(hub).update(TaskUpdateRequest(task_id="a", content="b"))
+            await _provider(hub).update(TaskUpdateRequest(task_id=PAGE, content="b"))
+
+    async def test_update_rejects_non_page_task_ids(self) -> None:
+        for bad in ("abc", "", "1234", f"{PAGE}x", f"https://evil.example/{PAGE}",
+                    f"http://app.notion.com/{PAGE}", f"{PAGE} OR 1=1"):
+            hub = _FakeHub()
+            with self.assertRaises(ProviderInvalidRequestError, msg=bad):
+                await _provider(hub).complete(bad)
+            with self.assertRaises(ProviderInvalidRequestError, msg=bad):
+                await _provider(hub).update(TaskUpdateRequest(task_id=bad, content="x"))
+            self.assertEqual(hub.calls, [])
+
+    async def test_update_accepts_page_ids_and_urls(self) -> None:
+        for good in (
+            PAGE,
+            "40121f6c-e439-8112-9943-fd9117c4f9c3",
+            f"https://app.notion.com/{PAGE}",
+            f"https://www.notion.so/Write-the-provider-{PAGE}",
+            f"https://notion.so/workspace/{PAGE}?pvs=4",
+        ):
+            hub = _FakeHub()
+            await _provider(hub).complete(good)
+            self.assertEqual(hub.calls[-1][2]["page_id"], good)
+
+    async def test_update_without_fields_is_rejected(self) -> None:
+        hub = _FakeHub()
+        with self.assertRaises(ProviderInvalidRequestError):
+            await _provider(hub).update(TaskUpdateRequest(task_id=PAGE))
+        self.assertEqual(hub.calls, [])
 
     async def test_complete_sets_done(self) -> None:
         hub = _FakeHub()
-        await _provider(hub).complete("abc")
+        await _provider(hub).complete(PAGE)
         self.assertEqual(hub.calls[-1], ("notion", "notion-update-page", {
-            "page_id": "abc", "command": "update_properties",
+            "page_id": PAGE, "command": "update_properties",
             "properties": {"Status": "Done"},
         }))
 
     async def test_delete_sets_dropped(self) -> None:
         hub = _FakeHub()
-        await _provider(hub).delete("abc")
+        await _provider(hub).delete(PAGE)
         self.assertEqual(hub.calls[-1], ("notion", "notion-update-page", {
-            "page_id": "abc", "command": "update_properties",
+            "page_id": PAGE, "command": "update_properties",
             "properties": {"Status": "Dropped"},
         }))
 
     async def test_bulk_update_applies_per_item(self) -> None:
         hub = _FakeHub()
         count = await _provider(hub).bulk_update(BulkTaskUpdateRequest(
-            task_ids=["a", "b"], operation="complete"))
+            task_ids=[PAGE, PAGE_B], operation="complete"))
         self.assertEqual(count, 2)
-        self.assertEqual([c[2]["page_id"] for c in hub.calls], ["a", "b"])
+        self.assertEqual([c[2]["page_id"] for c in hub.calls], [PAGE, PAGE_B])
 
 
 class NotionSelectionTests(unittest.TestCase):
@@ -386,6 +416,30 @@ class NotionToolDescriptionTests(unittest.TestCase):
             ))
             pairs = build_task_capabilities(config, _FakeHub())
         return {cap.tool_name: tool.description for cap, tool in pairs}
+
+    def _update_props(self, provider: str) -> dict:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config.load(make_workspace(Path(tmp)))
+            config.external_tools = ExternalToolsConfig(tasks=TasksProviderConfig(
+                enabled=True, provider=provider, mcp_server="notion",
+                data_source_id=DATA_SOURCE_ID,
+            ))
+            pairs = build_task_capabilities(config, _FakeHub())
+        update = next(t for cap, t in pairs if cap.tool_name == "tasks_update")
+        return update.parameters["properties"]
+
+    def test_notion_update_schema_describes_iso_and_unsupported(self) -> None:
+        props = self._update_props("notion")
+        self.assertIn("ISO", props["due_string"]["description"])
+        self.assertNotIn("tomorrow", props["due_string"]["description"])
+        for field in ("labels", "project_id", "section_id"):
+            self.assertIn("Not supported by notion", props[field]["description"])
+
+    def test_todoist_update_schema_unchanged(self) -> None:
+        props = self._update_props("todoist")
+        self.assertEqual(props["due_string"]["description"],
+                         "Natural-language due date (e.g. 'tomorrow 9am').")
+        self.assertEqual(props["labels"]["description"], "Replacement label set.")
 
     def test_notion_descriptions_drop_todoist_syntax(self) -> None:
         notion = self._descriptions("notion")

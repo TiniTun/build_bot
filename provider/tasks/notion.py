@@ -72,6 +72,16 @@ _MAX_LIMIT = 100
 
 # A Notion page id is the trailing 32 hex digits of its URL path.
 _PAGE_ID_IN_URL = re.compile(r"([0-9a-fA-F]{32})$")
+# A page reference the update tool accepts: a bare id (32 hex or dashed
+# UUID), or a Notion page URL whose path ends in one.
+_PAGE_ID = re.compile(
+    r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+)
+_PAGE_URL = re.compile(
+    r"^https://(?:app\.notion\.com|(?:www\.)?notion\.so)/(?:[^?#\s]*[/-])?"
+    r"[0-9a-fA-F]{32}(?:[?#][^\s]*)?$"
+)
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ISO_DATETIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
 
@@ -226,7 +236,6 @@ class NotionTaskProvider:
         return await self._query(where, params, limit)
 
     async def search(self, filter: str, limit: int) -> list[Task]:
-        # LIKE/LOWER fold ASCII only; non-ASCII names match case-sensitively.
         where = '"Status" NOT IN (?, ?) AND LOWER("Name") LIKE ? ESCAPE \'\\\''
         pattern = f"%{_escape_like(filter.strip().lower())}%"
         return await self._query(where, [STATUS_DONE, STATUS_DROPPED, pattern], limit)
@@ -234,6 +243,12 @@ class NotionTaskProvider:
     # -- writes --------------------------------------------------------------
 
     async def _update_properties(self, task_id: str, properties: dict[str, Any]) -> None:
+        if not (_PAGE_ID.match(task_id) or _PAGE_URL.match(task_id)):
+            raise ProviderInvalidRequestError(
+                "task_id must be a notion page id or a notion page url"
+            )
+        if not properties:
+            raise ProviderInvalidRequestError("no fields to update were provided")
         result = await self._hub.call_tool(
             self._server,
             UPDATE_TOOL,

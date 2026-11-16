@@ -62,6 +62,23 @@ _SEARCH_DESCRIPTIONS = {
         "(case-insensitive substring match, not a filter language)."
     ),
 }
+_UPDATE_FIELD_DESCRIPTIONS = {
+    "todoist": {
+        "due_string": "Natural-language due date (e.g. 'tomorrow 9am').",
+        "labels": "Replacement label set.",
+        "project_id": "Move to project id.",
+        "section_id": "Move to section id.",
+    },
+    "notion": {
+        "due_string": (
+            "Due date as ISO date (YYYY-MM-DD) or ISO datetime "
+            "(YYYY-MM-DDTHH:MM, optional offset) only; no natural language."
+        ),
+        "labels": "Not supported by notion; leave unset.",
+        "project_id": "Not supported by notion; leave unset.",
+        "section_id": "Not supported by notion; leave unset.",
+    },
+}
 _SEARCH_FILTER_DESCRIPTIONS = {
     "todoist": "Todoist filter query.",
     "notion": "Text to find in task names.",
@@ -93,6 +110,7 @@ def build_task_capabilities(
 
     provider = get_task_provider(config, hub)
     style = "notion" if config.external_tools.tasks.provider == "notion" else "todoist"
+    update_fields = _UPDATE_FIELD_DESCRIPTIONS[style]
 
     @tool(
         name="tasks_quick_add",
@@ -223,7 +241,7 @@ def build_task_capabilities(
                 "content": {"type": "string", "description": "New task content."},
                 "due_string": {
                     "type": "string",
-                    "description": "Natural-language due date (e.g. 'tomorrow 9am').",
+                    "description": update_fields["due_string"],
                 },
                 "priority": {
                     "type": "integer",
@@ -232,10 +250,16 @@ def build_task_capabilities(
                 "labels": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Replacement label set.",
+                    "description": update_fields["labels"],
                 },
-                "project_id": {"type": "string", "description": "Move to project id."},
-                "section_id": {"type": "string", "description": "Move to section id."},
+                "project_id": {
+                    "type": "string",
+                    "description": update_fields["project_id"],
+                },
+                "section_id": {
+                    "type": "string",
+                    "description": update_fields["section_id"],
+                },
             },
             "required": ["task_id"],
         },
