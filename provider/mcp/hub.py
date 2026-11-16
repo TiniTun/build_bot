@@ -643,6 +643,7 @@ def _connection_identity(config: McpServerConfig) -> tuple:
         config.url,
         config.url_env,
         config.token_env,
+        config.auth,
         config.health_url,
         config.health_path,
     )

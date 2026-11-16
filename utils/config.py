@@ -337,6 +337,10 @@ class Config(BaseModel):
         if self.planning is not None:
             self.planning.resolve(self.workspace)
 
+        if self.mcp is not None:
+            for server in self.mcp.servers.values():
+                server.resolve_paths(self.workspace)
+
         return self
 
     @classmethod
