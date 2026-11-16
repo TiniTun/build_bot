@@ -82,3 +82,38 @@ class McpCallResult:
     @property
     def is_empty(self) -> bool:
         return not self.text_blocks and self.structured_content is None
+
+
+@dataclass(frozen=True)
+class OAuthClientRegistration:
+    """A registered OAuth client, as reused across logins."""
+
+    client_id: str
+    client_secret: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class OAuthCallback:
+    """The parameters the browser brought back to the loopback redirect URI."""
+
+    code: str = field(repr=False)
+    state: str | None
+    iss: str | None = None
+
+
+@dataclass(frozen=True)
+class OAuthLoginResult:
+    """Everything an interactive login produced. Token fields never appear in ``repr``.
+
+    ``identity`` is the result of the optional identity tool called with the new
+    token; ``identity_error`` explains why it is missing when that call failed.
+    """
+
+    registration: OAuthClientRegistration
+    token_endpoint: str
+    resource: str
+    access_token: str = field(repr=False)
+    refresh_token: str | None = field(repr=False)
+    expires_in: float | None
+    identity: McpCallResult | None = None
+    identity_error: str | None = None

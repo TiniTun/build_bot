@@ -16,16 +16,20 @@ DELETE.
 """
 
 import asyncio
+import contextlib
 import logging
 import os
 import threading
-from typing import Any, Callable, Mapping, Protocol, Sequence
+from typing import Any, AsyncGenerator, Awaitable, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 import mcp_types
+from mcp.client.auth.exceptions import OAuthFlowError
+from mcp.client.auth.oauth2 import OAuthClientProvider
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.auth import AuthorizationCodeResult, OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
 from provider.mcp.errors import (
     McpAuthError,
@@ -34,10 +38,18 @@ from provider.mcp.errors import (
     McpError,
     McpLoginRequiredError,
     McpNotConnectedError,
+    McpOAuthClientRejectedError,
     McpProtocolError,
     McpTimeoutError,
 )
-from provider.mcp.models import McpCallResult, McpServerInfo, McpToolDef
+from provider.mcp.models import (
+    McpCallResult,
+    McpServerInfo,
+    McpToolDef,
+    OAuthCallback,
+    OAuthClientRegistration,
+    OAuthLoginResult,
+)
 from provider.mcp.oauth import McpOAuthAuth
 from provider.mcp.oauth_store import OAuthStore
 from utils.mcp_config import McpServerConfig
@@ -620,25 +632,29 @@ class StreamableHttpMcpClient:
         return self._to_call_result(tool_name, raw)
 
     def _to_call_result(self, tool_name: str, raw: mcp_types.CallToolResult) -> McpCallResult:
-        texts: list[str] = []
-        dropped: list[str] = []
-        for block in _content_blocks(raw):
-            if isinstance(block, mcp_types.TextContent):
-                texts.append(block.text)
-            else:
-                dropped.append(getattr(block, "type", type(block).__name__))
+        return _to_call_result(self.server_id, tool_name, raw)
 
-        structured = raw.structured_content
-        return McpCallResult(
-            server_id=self.server_id,
-            tool_name=tool_name,
-            text_blocks=tuple(texts),
-            structured_content=dict(structured) if structured else None,
-            is_error=bool(raw.is_error),
-            # `_meta` is host-side only; it never becomes model-visible content.
-            private_meta=dict(raw.meta) if raw.meta else {},
-            dropped_content_types=tuple(dict.fromkeys(dropped)),
-        )
+
+def _to_call_result(server_id: str, tool_name: str, raw: mcp_types.CallToolResult) -> McpCallResult:
+    texts: list[str] = []
+    dropped: list[str] = []
+    for block in _content_blocks(raw):
+        if isinstance(block, mcp_types.TextContent):
+            texts.append(block.text)
+        else:
+            dropped.append(getattr(block, "type", type(block).__name__))
+
+    structured = raw.structured_content
+    return McpCallResult(
+        server_id=server_id,
+        tool_name=tool_name,
+        text_blocks=tuple(texts),
+        structured_content=dict(structured) if structured else None,
+        is_error=bool(raw.is_error),
+        # `_meta` is host-side only; it never becomes model-visible content.
+        private_meta=dict(raw.meta) if raw.meta else {},
+        dropped_content_types=tuple(dict.fromkeys(dropped)),
+    )
 
 
 def _content_blocks(raw: mcp_types.CallToolResult) -> Sequence[Any]:
@@ -646,3 +662,221 @@ def _content_blocks(raw: mcp_types.CallToolResult) -> Sequence[Any]:
     if content is None:
         return ()
     return content
+
+
+# ---- interactive OAuth login (the ``mcp-login`` command) -----------------
+
+LOGIN_CLIENT_NAME = "build_bot"
+
+
+class _MemoryTokenStorage:
+    """SDK ``TokenStorage`` held in memory; the login command persists the outcome.
+
+    Only a client registration is ever seeded: a login always runs the full
+    authorization, so it starts with no tokens.
+    """
+
+    def __init__(self, client_info: OAuthClientInformationFull | None) -> None:
+        self.tokens: OAuthToken | None = None
+        self.client_info = client_info
+
+    async def get_tokens(self) -> OAuthToken | None:
+        return self.tokens
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        _SHARED_REDACTOR.add(tokens.access_token)
+        _SHARED_REDACTOR.add(tokens.refresh_token)
+        self.tokens = tokens
+
+    async def get_client_info(self) -> OAuthClientInformationFull | None:
+        return self.client_info
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        _SHARED_REDACTOR.add(client_info.client_secret)
+        self.client_info = client_info
+
+
+class _LoginOAuthProvider(OAuthClientProvider):
+    """``OAuthClientProvider`` that reports the first failure of its flow.
+
+    The Streamable HTTP transport logs and swallows exceptions raised inside a
+    POST, so a failed authorization would otherwise leave ``initialize`` waiting
+    forever. The failure is published on ``failure`` instead, and re-raised.
+    """
+
+    def __init__(self, failure: "asyncio.Future[BaseException]", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.failure = failure
+
+    async def async_auth_flow(self, request: httpx2.Request) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
+        flow = super().async_auth_flow(request)
+        try:
+            outgoing = await flow.__anext__()
+            while True:
+                incoming = yield outgoing
+                outgoing = await flow.asend(incoming)
+        except StopAsyncIteration:
+            return
+        except Exception as exc:
+            if not self.failure.done():
+                self.failure.set_result(exc)
+            raise
+        finally:
+            await flow.aclose()
+
+
+def _seed_client_info(
+    registration: OAuthClientRegistration | None, redirect_uri: str
+) -> OAuthClientInformationFull | None:
+    if registration is None:
+        return None
+    _SHARED_REDACTOR.add(registration.client_secret)
+    return OAuthClientInformationFull(
+        client_id=registration.client_id,
+        client_secret=registration.client_secret,
+        redirect_uris=[redirect_uri],
+        token_endpoint_auth_method="client_secret_post" if registration.client_secret else "none",
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+    )
+
+
+def _retrieve_outcome(task: "asyncio.Future[Any]") -> None:
+    if not task.cancelled():
+        task.exception()
+
+
+def _login_session_error(server_id: str, exc: BaseException | None) -> McpConnectionError:
+    leaves = _causal_chain(exc) if exc is not None else []
+    detail = _SHARED_REDACTOR.scrub("; ".join(f"{type(e).__name__}: {e}" for e in leaves[:3]))
+    return McpConnectionError(f"[{server_id}] login session failed: {detail}")
+
+
+def _login_failure(server_id: str, exc: BaseException, reused_registration: bool) -> BaseException:
+    """Map an SDK OAuth failure onto an internal error; pass anything else through.
+
+    Non-SDK exceptions come from the caller's own redirect/callback handlers and
+    already carry the caller's wording.
+    """
+    if not isinstance(exc, OAuthFlowError):
+        return exc
+    detail = _SHARED_REDACTOR.scrub(str(exc))
+    if reused_registration and "invalid_client" in detail:
+        return McpOAuthClientRejectedError(f"[{server_id}] the stored client registration was rejected")
+    return McpAuthError(f"[{server_id}] OAuth login failed: {detail}")
+
+
+async def authorize_interactively(
+    server_id: str,
+    url: str,
+    *,
+    redirect_uri: str,
+    registration: OAuthClientRegistration | None,
+    redirect_handler: Callable[[str], Awaitable[None]],
+    callback_handler: Callable[[], Awaitable[OAuthCallback]],
+    transport: httpx2.AsyncBaseTransport | None = None,
+    identity_tool: str | None = None,
+    request_timeout_seconds: float = 30.0,
+) -> OAuthLoginResult:
+    """Run the SDK's authorization-code + PKCE flow by opening one MCP session.
+
+    The first ``initialize`` POST gets a 401, which makes the SDK discover the
+    authorization server, register a client unless ``registration`` is given,
+    hand the authorization URL to ``redirect_handler`` and wait on
+    ``callback_handler``. With the new token the session initializes, and
+    ``identity_tool`` (if any) is called once to show whom the grant belongs to.
+    No overall deadline is applied here: the caller owns it.
+
+    Raises ``McpOAuthClientRejectedError`` when a reused registration is rejected
+    (``invalid_client``), ``McpAuthError`` for any other OAuth failure, and
+    ``McpConnectionError`` when the session fails for another reason.
+    """
+    loop = asyncio.get_running_loop()
+    failure: asyncio.Future[BaseException] = loop.create_future()
+    storage = _MemoryTokenStorage(_seed_client_info(registration, redirect_uri))
+
+    async def on_callback() -> AuthorizationCodeResult:
+        result = await callback_handler()
+        _SHARED_REDACTOR.add(result.code)
+        return AuthorizationCodeResult(code=result.code, state=result.state, iss=result.iss)
+
+    provider = _LoginOAuthProvider(
+        failure,
+        server_url=url,
+        client_metadata=OAuthClientMetadata(
+            client_name=LOGIN_CLIENT_NAME,
+            redirect_uris=[redirect_uri],
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            token_endpoint_auth_method="none",
+        ),
+        storage=storage,
+        redirect_handler=redirect_handler,
+        callback_handler=on_callback,
+    )
+
+    install_secret_scrub_filter()
+    error: BaseException | None = None
+    identity: McpCallResult | None = None
+    identity_error: str | None = None
+    http_client = httpx2.AsyncClient(
+        auth=provider,
+        transport=transport if transport is not None else httpx2.AsyncHTTPTransport(),
+        timeout=httpx2.Timeout(request_timeout_seconds),
+        follow_redirects=False,
+    )
+    init: asyncio.Task[Any] | None = None
+    try:
+        async with http_client:
+            async with streamable_http_client(url, http_client=http_client) as (read_stream, write_stream):
+                # No session-level read timeout: initialize stays pending while the
+                # operator logs in through the browser.
+                async with ClientSession(read_stream, write_stream, client_info=CLIENT_INFO) as session:
+                    init = asyncio.ensure_future(session.initialize())
+                    await asyncio.wait({init, failure}, return_when=asyncio.FIRST_COMPLETED)
+                    if failure.done():
+                        error = _login_failure(server_id, failure.result(), registration is not None)
+                    elif init.exception() is not None:
+                        error = _login_session_error(server_id, init.exception())
+                    elif identity_tool is not None:
+                        try:
+                            raw = await session.call_tool(
+                                identity_tool, {}, read_timeout_seconds=request_timeout_seconds
+                            )
+                            identity = _to_call_result(server_id, identity_tool, raw)
+                        except Exception as exc:
+                            identity_error = _SHARED_REDACTOR.scrub(f"{type(exc).__name__}: {exc}")
+    except Exception as exc:
+        # A failed auth flow can also surface as the transport's task-group error.
+        if failure.done() and not failure.cancelled():
+            error = _login_failure(server_id, failure.result(), registration is not None)
+        elif error is None:
+            error = _login_session_error(server_id, exc)
+    finally:
+        if init is not None:
+            # Not awaited: swallowing a CancelledError here would defeat the caller's deadline.
+            init.cancel()
+            init.add_done_callback(_retrieve_outcome)
+        if not failure.done():
+            failure.cancel()
+
+    if error is not None:
+        raise error
+
+    tokens = storage.tokens
+    client_info = provider.context.client_info
+    metadata = provider.context.oauth_metadata
+    if tokens is None or client_info is None:
+        raise McpAuthError(f"[{server_id}] OAuth login finished without a token")
+    if metadata is None or metadata.token_endpoint is None:
+        raise McpAuthError(f"[{server_id}] authorization server metadata has no token endpoint")
+    return OAuthLoginResult(
+        registration=OAuthClientRegistration(client_id=client_info.client_id, client_secret=client_info.client_secret),
+        token_endpoint=str(metadata.token_endpoint),
+        resource=provider.context.get_resource_url(),
+        access_token=tokens.access_token,
+        refresh_token=tokens.refresh_token,
+        expires_in=float(tokens.expires_in) if tokens.expires_in is not None else None,
+        identity=identity,
+        identity_error=identity_error,
+    )

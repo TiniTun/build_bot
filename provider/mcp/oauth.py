@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 _TERMINAL_ERRORS = frozenset({"invalid_grant", "invalid_client"})
 _TOKEN_TIMEOUT = httpx2.Timeout(30.0)
 # Used only when a successful token response omits ``expires_in``.
-_DEFAULT_EXPIRES_IN = 3600.0
+DEFAULT_EXPIRES_IN = 3600.0
 _SAFE_ERROR_CODE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 # The request never left this machine, so the token cannot have been rotated.
 _NOT_SENT_ERRORS = (httpx2.ConnectError, httpx2.ConnectTimeout, httpx2.PoolTimeout)
@@ -224,7 +224,7 @@ class McpOAuthAuth(httpx2.Auth):
                 raise ValueError("not an object")
             access_token = body["access_token"]
             refresh_token = body.get("refresh_token", grant.refresh_token)
-            expires_in = body.get("expires_in", _DEFAULT_EXPIRES_IN)
+            expires_in = body.get("expires_in", DEFAULT_EXPIRES_IN)
             if not isinstance(access_token, str) or not access_token:
                 raise TypeError("access_token")
             if not isinstance(refresh_token, str) or not refresh_token:
