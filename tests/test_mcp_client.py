@@ -15,7 +15,9 @@ from pathlib import Path
 
 import httpx2
 
-from provider.mcp.client import SecretScrubFilter, StreamableHttpMcpClient
+from mcp.client.auth.exceptions import OAuthTokenError
+
+from provider.mcp.client import StreamableHttpMcpClient, _login_failure
 from provider.mcp.errors import (
     McpAuthError,
     McpConfigError,
@@ -25,7 +27,10 @@ from provider.mcp.errors import (
     McpTimeoutError,
 )
 from provider.mcp.oauth_store import OAuthGrant, OAuthStore
+from tests.helpers import make_workspace
 from tests.mcp_fakes import FakeMcpHttpServer, text_result, tool_spec
+from utils.config import Config
+from utils.logging import setup_logging
 from utils.mcp_config import McpServerConfig
 
 MCP_URL = "http://movies-db.test:8765/mcp"
@@ -550,17 +555,68 @@ class SecretScrubLoggingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(STORED_ACCESS, output)
         self.assertIn("***", output)
 
-    async def test_filter_is_installed_on_sdk_and_project_loggers(self) -> None:
+    def _setup_logging_to_file(self) -> Path:
+        """Run the real ``setup_logging`` into a temp workspace; return the log file."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        config = Config.load(make_workspace(tmp))
+        root = logging.getLogger()
+        old_level, old_handlers = root.level, list(root.handlers)
+        setup_logging(config, console_output=False)
+        added = [h for h in root.handlers if h not in old_handlers]
+
+        def _restore() -> None:
+            for handler in added:
+                root.removeHandler(handler)
+                handler.close()
+            root.setLevel(old_level)
+
+        self.addCleanup(_restore)
+        return config.logging_path / "built-bot.log"
+
+    def _log_secret_with_traceback(self, logger_name: str) -> str:
+        log_file = self._setup_logging_to_file()
+        try:
+            raise RuntimeError(f"token endpoint said refresh_token={STORED_ACCESS}")
+        except RuntimeError:
+            logging.getLogger(logger_name).debug("refresh failed for %s", STORED_ACCESS, exc_info=True)
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        return log_file.read_text(encoding="utf-8")
+
+    async def test_sdk_oauth2_child_logger_is_scrubbed_in_handler_output(self) -> None:
         self._make_client_with_secret()
-        for name in ("mcp.client.auth", "mcp.client.streamable_http", "provider.mcp", "provider.mcp.oauth"):
-            filters = logging.getLogger(name).filters
-            self.assertEqual(sum(isinstance(f, SecretScrubFilter) for f in filters), 1, msg=name)
+        output = self._log_secret_with_traceback("mcp.client.auth.oauth2")
+        self.assertIn("refresh failed for", output)
+        self.assertIn("RuntimeError", output)
+        self.assertNotIn(STORED_ACCESS, output)
+        self.assertIn("***", output)
+
+    async def test_handler_scrubs_a_logger_without_its_own_filter(self) -> None:
+        self._make_client_with_secret()
+        output = self._log_secret_with_traceback("some.unlisted.library")
+        self.assertIn("refresh failed for", output)
+        self.assertNotIn(STORED_ACCESS, output)
 
     async def test_project_child_logger_is_scrubbed(self) -> None:
         self._make_client_with_secret()
         stream = self._capture("provider.mcp.oauth")
         logging.getLogger("provider.mcp.oauth").warning("token %s leaked", STORED_ACCESS)
         self.assertNotIn(STORED_ACCESS, stream.getvalue())
+
+
+class LoginFailureTests(unittest.TestCase):
+    def test_invalid_token_response_detail_is_replaced(self) -> None:
+        leaked = "secret-token-from-pydantic-input-value"
+        exc = OAuthTokenError(f"Invalid token response: 1 validation error input_value={{'access_token': '{leaked}'}}")
+        error = _login_failure("notion", exc, reused_registration=False)
+        self.assertIsInstance(error, McpAuthError)
+        self.assertNotIn(leaked, str(error))
+        self.assertIn("Invalid token response", str(error))
+
+    def test_other_token_errors_keep_their_detail(self) -> None:
+        error = _login_failure("notion", OAuthTokenError("Token exchange failed (400): bad"), reused_registration=False)
+        self.assertIn("Token exchange failed", str(error))
 
 
 if __name__ == "__main__":

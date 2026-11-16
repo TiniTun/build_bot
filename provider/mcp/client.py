@@ -25,7 +25,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx2
 import mcp_types
-from mcp.client.auth.exceptions import OAuthFlowError
+from mcp.client.auth.exceptions import OAuthFlowError, OAuthTokenError
 from mcp.client.auth.oauth2 import OAuthClientProvider
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -148,10 +148,13 @@ class _Redactor:
 _SHARED_REDACTOR = _Redactor()
 
 # Loggers that can see request data or token material. Filters on a logger do not
-# apply to records propagated from its children, so the project's own MCP module
-# loggers are listed individually alongside the ``provider.mcp`` package logger.
+# apply to records propagated from its children, so module loggers are listed
+# individually. This is belt-and-braces: ``utils.logging.setup_logging`` puts the
+# same filter on every handler it creates, which covers every logger.
 SCRUBBED_LOGGERS = (
     "mcp.client.auth",
+    "mcp.client.auth.oauth2",
+    "mcp.client.auth.utils",
     "mcp.client.streamable_http",
     "provider.mcp",
     "provider.mcp.client",
@@ -190,6 +193,11 @@ class SecretScrubFilter(logging.Filter):
         if record.stack_info:
             record.stack_info = scrub(record.stack_info)
         return True
+
+
+def make_secret_scrub_filter() -> SecretScrubFilter:
+    """Return a ``SecretScrubFilter`` over the process-wide redactor (for handlers)."""
+    return SecretScrubFilter(_SHARED_REDACTOR)
 
 
 def install_secret_scrub_filter() -> None:
@@ -760,7 +768,11 @@ def _login_failure(server_id: str, exc: BaseException, reused_registration: bool
     """
     if not isinstance(exc, OAuthFlowError):
         return exc
-    detail = _SHARED_REDACTOR.scrub(str(exc))
+    if isinstance(exc, OAuthTokenError) and str(exc).startswith("Invalid token response"):
+        # The SDK appends a pydantic validation error whose input_value can echo a token.
+        detail = "Invalid token response from the token endpoint"
+    else:
+        detail = _SHARED_REDACTOR.scrub(str(exc))
     if reused_registration and "invalid_client" in detail:
         return McpOAuthClientRejectedError(f"[{server_id}] the stored client registration was rejected")
     return McpAuthError(f"[{server_id}] OAuth login failed: {detail}")
