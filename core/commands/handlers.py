@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from core.commands.base import Command
 from core.pending_actions import PendingActionStore
+from provider.mcp.hub import McpServerState
 from tools.capabilities import ToolPolicy
 from tools.capability_catalog import (
     build_capability_registry,
@@ -260,7 +261,9 @@ class McpCommand(Command):
                 f"tools {status.enabled_tools}/{status.discovered_tools} enabled, "
                 f"{status.quarantined_tools} quarantined"
             )
-            if status.last_error:
+            if status.state is McpServerState.LOGIN_REQUIRED:
+                summary += f"; {_login_hint(status.server_id)}"
+            elif status.last_error:
                 summary += f"; last error: {_short(status.last_error)}"
             lines.append(summary)
         return "\n".join(lines)
@@ -272,6 +275,8 @@ class McpCommand(Command):
             f"**Enabled:** {status.enabled}",
             f"**Required:** {status.required}",
         ]
+        if status.state is McpServerState.LOGIN_REQUIRED:
+            lines.append(f"**Action:** {_login_hint(status.server_id)}")
         if status.server_name:
             lines.append(f"**Server:** {status.server_name} {status.server_version or ''}".strip())
         if status.last_discovery_at is not None:
@@ -304,6 +309,10 @@ class McpCommand(Command):
         if status.last_error:
             lines.append(f"**Last error:** {_short(status.last_error)}")
         return "\n".join(lines)
+
+
+def _login_hint(server_id: str) -> str:
+    return f"login required, run `build-bot mcp-login {server_id}` on the bot host"
 
 
 def _short(text: str, limit: int = 200) -> str:

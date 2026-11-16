@@ -26,11 +26,14 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Mapping
 
 from provider.mcp.client import McpClient, StreamableHttpMcpClient
 from provider.mcp.errors import (
+    McpConfigError,
     McpError,
+    McpLoginRequiredError,
     McpNotConnectedError,
     McpTimeoutError,
 )
 from provider.mcp.models import McpCallResult, McpServerInfo, McpToolDef
+from provider.mcp.oauth_store import OAuthStore
 from utils.mcp_config import McpServerConfig
 
 if TYPE_CHECKING:
@@ -39,6 +42,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 ClientFactory = Callable[[str, McpServerConfig], McpClient]
+# ``(server_id, kind)`` with kind one of the ``NOTICE_*`` values below. The hub
+# logs and swallows its failures.
+NoticeCallback = Callable[[str, str], Awaitable[None]]
+NOTICE_LOGIN_REQUIRED = "login_required"
+NOTICE_REFRESH_CAP_SOON = "refresh_cap_soon"
+
+# Refresh tokens stop working 180 days after the grant; warn ~14 days earlier.
+REFRESH_CAP_WARN_AFTER_SECONDS = 166 * 86400
 
 
 class McpServerState(str, Enum):
@@ -52,6 +63,8 @@ class McpServerState(str, Enum):
     RECONNECTING = "reconnecting"
     # A required server that could not be brought up; startup fails on this.
     FAILED = "failed"
+    # The OAuth grant is missing or dead; only the login command can fix it.
+    LOGIN_REQUIRED = "login_required"
 
 
 @dataclass(frozen=True)
@@ -108,6 +121,15 @@ class _ServerRuntime:
     pending_refresh: bool = False
     reconnect_task: asyncio.Task[None] | None = None
     reconnect_attempt: int = 0
+    # Login-required incident: open from the first McpLoginRequiredError until a
+    # successful bring-up. The operator is notified once per incident.
+    login_required: bool = False
+    # Token-store mtime seen by the bring-up attempt that last needed a login;
+    # the reconnect loop only retries once the file changes from this.
+    login_store_mtime: float | None = None
+    attempt_store_mtime: float | None = None
+    # ``granted_at`` of the grant already warned about the refresh-token cap.
+    refresh_cap_warned_for: float | None = None
 
 
 def _default_client_factory(server_id: str, config: McpServerConfig) -> McpClient:
@@ -142,6 +164,16 @@ class McpHub:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._reconcile_task: asyncio.Task[None] | None = None
         self._reconcile_pending = False
+        self._notice_callback: NoticeCallback | None = None
+        self._notice_tasks: set[asyncio.Task[None]] = set()
+
+    def set_notice_callback(self, callback: NoticeCallback | None) -> None:
+        """Route operator notices (login required, refresh cap) somewhere.
+
+        A setter because ``SharedContext`` builds the hub before the server
+        exists. Without a callback notices are only logged (``chat`` mode).
+        """
+        self._notice_callback = callback
 
     # ---- introspection -------------------------------------------------
 
@@ -241,12 +273,15 @@ class McpHub:
                     logger.error("Required MCP server %s failed to start: %s", server_id, exc)
                     await self.stop()
                     raise
-                logger.warning("Optional MCP server %s is degraded: %s", server_id, exc)
+                logger.warning("Optional MCP server %s is %s: %s", server_id, runtime.state.value, exc)
                 self._schedule_reconnect(runtime)
 
     async def _bring_up(self, runtime: _ServerRuntime) -> None:
         """health -> connect/initialize -> list_tools -> publish snapshot."""
         runtime.state = McpServerState.CONNECTING
+        # Read before any auth work so a login that lands mid-attempt still
+        # counts as a change for the login-required poll.
+        runtime.attempt_store_mtime = _store_mtime(runtime.config)
         client = runtime.client
         if client is None:
             client = self._client_factory(runtime.server_id, runtime.config)
@@ -261,12 +296,33 @@ class McpHub:
         runtime.last_error = None
         # A stable connection resets the backoff ladder.
         runtime.reconnect_attempt = 0
+        if runtime.login_required:
+            logger.info("MCP server %s login-required incident cleared", runtime.server_id)
+        runtime.login_required = False
         logger.info(
             "MCP server %s connected (%s tools discovered, %s enabled)",
             runtime.server_id,
             len(tools),
             sum(1 for t in tools if runtime.config.is_tool_allowed(t.name)),
         )
+        self._check_refresh_cap(runtime)
+
+    def _check_refresh_cap(self, runtime: _ServerRuntime) -> None:
+        """Warn once per grant when the refresh-token cap is about two weeks away."""
+        auth = runtime.config.auth
+        if auth is None:
+            return
+        try:
+            grant = OAuthStore(auth.token_store).load()
+        except McpConfigError as exc:
+            logger.warning("Cannot check OAuth grant age for %s: %s", runtime.server_id, exc)
+            return
+        if grant is None or runtime.refresh_cap_warned_for == grant.granted_at:
+            return
+        if self._clock() > grant.granted_at + REFRESH_CAP_WARN_AFTER_SECONDS:
+            runtime.refresh_cap_warned_for = grant.granted_at
+            logger.warning("MCP server %s OAuth grant nears its refresh-token cap", runtime.server_id)
+            self._notify(runtime.server_id, NOTICE_REFRESH_CAP_SOON)
 
     def _publish(
         self,
@@ -285,17 +341,49 @@ class McpHub:
         )
 
     def _mark_failure(self, runtime: _ServerRuntime, exc: BaseException) -> None:
-        runtime.state = McpServerState.FAILED if runtime.config.required else McpServerState.DEGRADED
         runtime.last_error = str(exc)
         # A degraded server publishes nothing: its capabilities disappear rather
         # than lingering as tools that would fail on every call.
         runtime.snapshot = None
+        if isinstance(exc, McpLoginRequiredError):
+            runtime.state = McpServerState.LOGIN_REQUIRED
+            runtime.login_store_mtime = runtime.attempt_store_mtime
+            if not runtime.login_required:
+                runtime.login_required = True
+                logger.warning(
+                    "MCP server %s needs a new login: run `build-bot mcp-login %s`",
+                    runtime.server_id,
+                    runtime.server_id,
+                )
+                self._notify(runtime.server_id, NOTICE_LOGIN_REQUIRED)
+            return
+        runtime.state = McpServerState.FAILED if runtime.config.required else McpServerState.DEGRADED
+
+    # ---- operator notices ----------------------------------------------
+
+    def _notify(self, server_id: str, kind: str) -> None:
+        """Hand a notice to the callback without blocking connection work."""
+        callback = self._notice_callback
+        if callback is None or self._shutting_down:
+            logger.info("MCP notice %s for %s not sent: no notice callback", kind, server_id)
+            return
+        task = asyncio.create_task(self._run_notice(callback, server_id, kind), name=f"mcp-notice-{server_id}")
+        self._notice_tasks.add(task)
+        task.add_done_callback(self._notice_tasks.discard)
+
+    async def _run_notice(self, callback: NoticeCallback, server_id: str, kind: str) -> None:
+        try:
+            await callback(server_id, kind)
+        except Exception:
+            logger.exception("MCP notice %s for %s failed", kind, server_id)
 
     async def stop(self) -> None:
         """Close every client. Safe to call repeatedly and before ``start()``."""
         self._shutting_down = True
         await _cancel(self._reconcile_task)
         self._reconcile_task = None
+        for notice_task in list(self._notice_tasks):
+            await _cancel(notice_task)
         for runtime in list(self._servers.values()):
             await self._tear_down(runtime)
         self._started = False
@@ -349,11 +437,21 @@ class McpHub:
         ever replayed here.
         """
         while not self._shutting_down and runtime.config.enabled:
-            delay = self._backoff_delay(runtime)
-            runtime.state = McpServerState.RECONNECTING
-            await self._sleep(delay)
-            if self._shutting_down or not runtime.config.enabled:
-                return
+            if runtime.login_required and runtime.config.auth is not None:
+                # No network until an operator logs in: a cheap local poll of the
+                # token store at max backoff is the only thing that runs.
+                await self._sleep(runtime.config.reconnect_max_seconds)
+                if self._shutting_down or not runtime.config.enabled:
+                    return
+                if _store_mtime(runtime.config) == runtime.login_store_mtime:
+                    continue
+                logger.info("MCP server %s token store changed; reconnecting", runtime.server_id)
+            else:
+                delay = self._backoff_delay(runtime)
+                runtime.state = McpServerState.RECONNECTING
+                await self._sleep(delay)
+                if self._shutting_down or not runtime.config.enabled:
+                    return
 
             client = runtime.client
             runtime.client = None
@@ -366,7 +464,8 @@ class McpHub:
             try:
                 await self._bring_up(runtime)
             except McpError as exc:
-                runtime.reconnect_attempt += 1
+                if not isinstance(exc, McpLoginRequiredError):
+                    runtime.reconnect_attempt += 1
                 self._mark_failure(runtime, exc)
                 logger.info(
                     "MCP reconnect attempt %s for %s failed: %s",
@@ -630,6 +729,12 @@ class McpHub:
 
     def _on_call_failure(self, runtime: _ServerRuntime, exc: McpError) -> None:
         """A lost connection should start restoring future availability."""
+        if isinstance(exc, McpLoginRequiredError):
+            # The grant died during this call; the store as it is now is dead.
+            runtime.attempt_store_mtime = _store_mtime(runtime.config)
+            self._mark_failure(runtime, exc)
+            self._schedule_reconnect(runtime)
+            return
         client = runtime.client
         if isinstance(exc, McpNotConnectedError) or (client is not None and not client.is_connected):
             runtime.state = McpServerState.DEGRADED
@@ -647,6 +752,13 @@ def _connection_identity(config: McpServerConfig) -> tuple:
         config.health_url,
         config.health_path,
     )
+
+
+def _store_mtime(config: McpServerConfig) -> float | None:
+    """Token-store mtime for an OAuth server; None without auth or without a file."""
+    if config.auth is None:
+        return None
+    return OAuthStore(config.auth.token_store).mtime()
 
 
 async def _cancel(task: asyncio.Task[None] | None) -> None:

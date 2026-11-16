@@ -16,6 +16,7 @@ from .delivery_worker import DeliveryWorker
 from .channel_worker import ChannelWorker
 from .websocket_worker import WebSocketWorker
 from .app import create_app
+from .operator_notice import make_mcp_notice_callback
 from utils.config import ConfigReloader
 
 if TYPE_CHECKING:
@@ -35,6 +36,9 @@ class Server:
     async def run(self) -> None:
         """Start all workers and monitor for crashes."""
         self._setup_workers()
+
+        # Before start(), so a dead grant found at startup is reported too.
+        self.context.mcp_hub.set_notice_callback(make_mcp_notice_callback(self.context))
 
         # Initial MCP discovery has to finish before workers can route work to an
         # agent session, otherwise a session could be built without its tools.
