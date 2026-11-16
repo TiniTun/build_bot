@@ -11,6 +11,7 @@ The file's contents are secrets: they never appear in an exception message.
 import asyncio
 import fcntl
 import json
+import logging
 import os
 import tempfile
 import time
@@ -20,6 +21,8 @@ from pathlib import Path
 from typing import AsyncIterator
 
 from provider.mcp.errors import McpConfigError, McpTimeoutError
+
+logger = logging.getLogger(__name__)
 
 _LOCK_POLL_SECONDS = 0.1
 _TIME_FIELDS = frozenset({"expires_at", "granted_at"})
@@ -105,10 +108,17 @@ class OAuthStore:
             raise
 
     def mtime(self) -> float | None:
-        """Return the file's modification time, or None if it does not exist."""
+        """Return the file's modification time, or None if it is missing or unreadable.
+
+        Callers use this as a cheap change signal; an unreadable store must not
+        abort startup or a reconnect loop. ``load()`` reports the real error.
+        """
         try:
             return self._path.stat().st_mtime
         except FileNotFoundError:
+            return None
+        except OSError as exc:
+            logger.warning("Cannot stat OAuth store %s: %s", self._path, type(exc).__name__)
             return None
 
     @asynccontextmanager

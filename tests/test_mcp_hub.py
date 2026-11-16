@@ -681,6 +681,46 @@ class HubLoginRequiredTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(result.is_error)
             await hub.stop()
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    async def test_unreadable_token_store_does_not_abort_startup(self) -> None:
+        from provider.mcp.client import StreamableHttpMcpClient
+        from tests.mcp_fakes import FakeMcpHttpServer, tool_spec
+
+        movies = FakeMcpClient("movies_db", tools=(fake_tool("movies_db", "alpha"),))
+        notion_server = FakeMcpHttpServer(tools=[tool_spec("alpha")])
+
+        def factory(server_id: str, config):
+            if server_id == "movies_db":
+                return movies
+            return StreamableHttpMcpClient(server_id, config, env={}, transport_factory=notion_server.transport)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            store_dir = Path(tmp) / "secrets"
+            store_dir.mkdir()
+            (store_dir / "notion.json").write_text("{}")
+            os.chmod(store_dir, 0)
+            try:
+                hub = McpHub(
+                    _config(workspace, {"notion": _oauth_server(store_dir / "notion.json"), "movies_db": _server()}),
+                    client_factory=factory,
+                    sleep=_CountingSleep().sleep,
+                )
+                hub.set_notice_callback(_NoticeRecorder())
+                with self.assertLogs("provider.mcp.oauth_store", level="WARNING") as logs:
+                    await hub.start()
+                    await _spin()
+                self.assertIn(hub.state("notion"), (McpServerState.LOGIN_REQUIRED, McpServerState.DEGRADED))
+                self.assertEqual(hub.state("movies_db"), McpServerState.CONNECTED)
+                reconnect = hub._servers["notion"].reconnect_task
+                self.assertIsNotNone(reconnect)
+                self.assertFalse(reconnect.done())
+                self.assertTrue(all("{}" not in line for line in logs.output))
+                self.assertEqual(notion_server.requests, [])
+                await hub.stop()
+            finally:
+                os.chmod(store_dir, 0o700)
+
     async def test_failing_notice_callback_is_logged_not_raised(self) -> None:
         client = FakeMcpClient("notion", connect_error=_login_error())
 
