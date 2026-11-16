@@ -16,6 +16,12 @@ from provider.external_errors import (
     ProviderInvalidRequestError,
     ProviderInvalidResponseError,
 )
+from provider.mcp.errors import (
+    McpAuthError,
+    McpLoginRequiredError,
+    McpNotConnectedError,
+    McpTimeoutError,
+)
 from provider.mcp.models import McpCallResult
 from provider.tasks import (
     BulkTaskUpdateRequest,
@@ -219,6 +225,49 @@ class NotionResponseStrictnessTests(unittest.IsolatedAsyncioTestCase):
     def test_invalid_response_maps_to_provider_error(self) -> None:
         result = provider_exception_to_result(ProviderInvalidResponseError("x"))
         self.assertEqual(result.error_value.code, ToolErrorCode.PROVIDER_ERROR)
+
+
+class McpErrorMappingTests(unittest.TestCase):
+    def test_timeout_is_ambiguous_and_not_retryable(self) -> None:
+        error = provider_exception_to_result(McpTimeoutError("[notion] call timed out")).error_value
+        self.assertEqual(error.code, ToolErrorCode.PROVIDER_ERROR)
+        self.assertFalse(error.retryable)
+        self.assertIn("may have been applied", error.message)
+        self.assertIn("check before retrying", error.message)
+
+    def test_login_required_and_auth_errors_need_a_relogin(self) -> None:
+        for exc in (McpLoginRequiredError("[notion] login required"), McpAuthError("[notion] rejected")):
+            error = provider_exception_to_result(exc).error_value
+            self.assertEqual(error.code, ToolErrorCode.AUTH_MISSING, msg=type(exc).__name__)
+            self.assertFalse(error.retryable)
+            self.assertEqual(
+                error.user_action, "Notion needs a re-login: run build-bot mcp-login notion on the bot host"
+            )
+
+    def test_not_connected_is_retryable_later(self) -> None:
+        error = provider_exception_to_result(McpNotConnectedError("[notion] is not connected")).error_value
+        self.assertEqual(error.code, ToolErrorCode.PROVIDER_ERROR)
+        self.assertTrue(error.retryable)
+        self.assertIn("Notion is not connected", error.message)
+
+    async def _tool_error(self, exc: Exception) -> dict:
+        class _FailingHub(_FakeHub):
+            async def call_tool(self, server_id, tool_name, arguments=None):
+                raise exc
+
+        provider = _provider(_FailingHub())
+        try:
+            await provider.list_inbox(10)
+        except Exception as raised:  # noqa: BLE001 - mirrors the task tools' handler
+            return json.loads(provider_exception_to_result(raised).to_tool_content())["error"]
+        self.fail("provider did not raise")
+
+    def test_mcp_errors_propagate_from_the_provider_to_the_mapping(self) -> None:
+        import asyncio
+
+        error = asyncio.run(self._tool_error(McpTimeoutError("[notion] call timed out")))
+        self.assertEqual(error["code"], "provider_error")
+        self.assertFalse(error["retryable"])
 
 
 class NotionWriteTests(unittest.IsolatedAsyncioTestCase):

@@ -1,7 +1,8 @@
-"""Shared helpers for external (email/calendar) tool factories.
+"""Shared helpers for external (email/calendar/tasks) tool factories.
 
 Maps provider exceptions to stable ``ToolResult`` errors without leaking secrets
-or raw provider messages to the LLM.
+or raw provider messages to the LLM. MCP errors reach here from MCP-backed
+providers (the Notion task provider lets ``McpError`` propagate unchanged).
 """
 
 from provider.external_errors import (
@@ -12,11 +13,31 @@ from provider.external_errors import (
     ProviderPermissionError,
     ProviderRateLimitError,
 )
+from provider.mcp.errors import McpAuthError, McpNotConnectedError, McpTimeoutError
 from tools.base import ToolErrorCode, ToolResult
 
 
 def provider_exception_to_result(exc: Exception) -> ToolResult:
     """Translate a provider exception into a safe, stable ToolResult error."""
+    if isinstance(exc, McpTimeoutError):
+        # Ambiguous: the server may have applied the change. Never retry blindly.
+        return ToolResult.error(
+            ToolErrorCode.PROVIDER_ERROR,
+            "The request timed out and is ambiguous: it may have been applied; check before retrying.",
+        )
+    if isinstance(exc, McpAuthError):
+        # Covers McpLoginRequiredError: only an operator login can fix it.
+        return ToolResult.error(
+            ToolErrorCode.AUTH_MISSING,
+            "Notion is not authenticated.",
+            user_action="Notion needs a re-login: run build-bot mcp-login notion on the bot host",
+        )
+    if isinstance(exc, McpNotConnectedError):
+        return ToolResult.error(
+            ToolErrorCode.PROVIDER_ERROR,
+            "Notion is not connected right now; try again later.",
+            retryable=True,
+        )
     if isinstance(exc, AuthMissingError):
         return ToolResult.error(
             ToolErrorCode.AUTH_MISSING,
