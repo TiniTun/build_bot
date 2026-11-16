@@ -8,9 +8,9 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
+from provider.mcp.hub import _connection_identity
 from tests.helpers import make_workspace, write_file
 from utils.config import Config
-from provider.mcp.hub import _connection_identity
 from utils.mcp_config import McpConfig, McpServerConfig, McpToolPolicy
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -282,10 +282,6 @@ def _uncomment_mcp_block(text: str) -> str:
     return "\n".join(out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def _oauth_server(**overrides) -> dict:
     base = {
         "url": "https://mcp.notion.com/mcp",
@@ -302,7 +298,7 @@ class McpOAuthAndArgumentRuleTests(unittest.TestCase):
         self.assertEqual(cfg.auth.callback_port, 33418)
 
     def test_oauth_and_token_env_are_exclusive(self) -> None:
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, "at most one of 'auth' or 'token_env'"):
             McpServerConfig.model_validate(_oauth_server(token_env="X"))
 
     def test_oauth_token_store_resolves_against_workspace(self) -> None:
@@ -332,3 +328,7 @@ class McpOAuthAndArgumentRuleTests(unittest.TestCase):
             _oauth_server(auth={"type": "oauth", "token_store": ".secrets/mcp/other.json"})
         )
         self.assertNotEqual(_connection_identity(a), _connection_identity(b))
+
+
+if __name__ == "__main__":
+    unittest.main()
