@@ -78,6 +78,35 @@ class OAuthStoreTests(unittest.IsolatedAsyncioTestCase):
             self.store.load()
         self.assertNotIn("SECRET", str(ctx.exception))
 
+    def test_wrong_typed_values_raise_without_contents(self) -> None:
+        good = json.loads(json.dumps(__import__("dataclasses").asdict(_grant())))
+        bad_values = {
+            "access_token": 123,
+            "refresh_token": None,
+            "expires_at": "SECRET",
+            "granted_at": True,
+            "client_secret": 5,
+        }
+        self.path.parent.mkdir(parents=True)
+        for key, bad in bad_values.items():
+            with self.subTest(key=key):
+                self.path.write_text(json.dumps({**good, key: bad}))
+                with self.assertRaises(McpConfigError) as ctx:
+                    self.store.load()
+                self.assertNotIn("SECRET", str(ctx.exception))
+
+    def test_invalid_utf8_raises_config_error(self) -> None:
+        self.path.parent.mkdir(parents=True)
+        self.path.write_bytes(b"\xff\xfeSECRET")
+        with self.assertRaises(McpConfigError) as ctx:
+            self.store.load()
+        self.assertNotIn("SECRET", str(ctx.exception))
+
+    async def test_lock_creates_parent_0700(self) -> None:
+        async with self.store.locked():
+            pass
+        self.assertEqual(self.path.parent.stat().st_mode & 0o777, 0o700)
+
     async def test_lock_excludes_second_holder(self) -> None:
         async with self.store.locked():
             with self.assertRaises(McpTimeoutError):

@@ -22,6 +22,7 @@ from typing import AsyncIterator
 from provider.mcp.errors import McpConfigError, McpTimeoutError
 
 _LOCK_POLL_SECONDS = 0.1
+_TIME_FIELDS = frozenset({"expires_at", "granted_at"})
 
 
 @dataclass
@@ -56,22 +57,38 @@ class OAuthStore:
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return None
+        except UnicodeDecodeError:
+            raise McpConfigError(f"OAuth store {self._path} is malformed; run the login command again") from None
         except OSError as exc:
             raise McpConfigError(f"cannot read OAuth store {self._path}: {type(exc).__name__}") from None
         try:
             data = json.loads(raw)
             if not isinstance(data, dict):
                 raise ValueError("not an object")
-            return OAuthGrant(**{f.name: data[f.name] for f in fields(OAuthGrant)})
+            values = {f.name: data[f.name] for f in fields(OAuthGrant)}
+            for name, value in values.items():
+                if name in _TIME_FIELDS:
+                    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+                elif name == "client_secret":
+                    ok = value is None or isinstance(value, str)
+                else:
+                    ok = isinstance(value, str)
+                if not ok:
+                    raise TypeError(name)
+            return OAuthGrant(**values)
         except (ValueError, KeyError, TypeError):
             # Deliberately drop the cause: it may quote file contents.
             raise McpConfigError(f"OAuth store {self._path} is malformed; run the login command again") from None
 
+    def _ensure_parent(self) -> None:
+        parent = self._path.parent
+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(parent, 0o700)
+
     def save(self, grant: OAuthGrant) -> None:
         """Atomically write the grant with mode 0600 (parent directory 0700)."""
         parent = self._path.parent
-        parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(parent, 0o700)
+        self._ensure_parent()
         payload = json.dumps(asdict(grant), indent=2)
         tmp = tempfile.NamedTemporaryFile(
             "w", dir=parent, prefix=f".{self._path.name}.", delete=False, encoding="utf-8"
@@ -97,7 +114,7 @@ class OAuthStore:
     @asynccontextmanager
     async def locked(self, timeout: float = 30.0) -> AsyncIterator[None]:
         """Hold the exclusive cross-process lock, or raise ``McpTimeoutError``."""
-        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_parent()
         fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
             deadline = time.monotonic() + timeout
