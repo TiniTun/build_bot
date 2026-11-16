@@ -18,7 +18,7 @@ from core.agent import Agent
 from core.events import CliEventSource, InboundEvent, OutboundEvent
 from provider.llm.base import LLMToolCall
 from provider.mcp.client import StreamableHttpMcpClient
-from provider.mcp.errors import McpConnectionError, McpError
+from provider.mcp.errors import McpConnectionError, McpError, McpProtocolError
 from provider.mcp.hub import McpHub, McpServerState
 from provider.mcp.oauth import McpOAuthAuth
 from provider.mcp.oauth_store import OAuthGrant, OAuthStore
@@ -451,6 +451,100 @@ class OAuthSessionRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 token_mode["status"] = 200
                 await wait_for(McpServerState.CONNECTED)
                 self.assertEqual((await hub.call_tool("notion", "alpha", {})).text_blocks, ("ok",))
+            finally:
+                await hub.stop()
+
+
+class _RpcErrorServer(FakeMcpHttpServer):
+    """Answers ``tools/call`` with a JSON-RPC error, or with a bare HTTP status."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.call_error: tuple[int, str] | None = None
+        self.call_status: int | None = None
+
+    def _call_tool_response(self, rpc_id, params):
+        if self.call_error is not None:
+            return self._error(rpc_id, *self.call_error)
+        if self.call_status is not None:
+            return httpx2.Response(self.call_status, text="")
+        return super()._call_tool_response(rpc_id, params)
+
+
+class CallErrorClassificationTests(unittest.IsolatedAsyncioTestCase):
+    """Real client + hub: only a lost connection takes the server offline."""
+
+    async def _start(self, tmp: str, server: FakeMcpHttpServer) -> tuple[McpHub, list[str]]:
+        workspace = make_workspace(Path(tmp))
+        store_path = Path(tmp) / "secrets" / "notion.json"
+        OAuthStore(store_path).save(
+            OAuthGrant(
+                client_id="cid",
+                client_secret=None,
+                redirect_uri="http://127.0.0.1:33418/callback",
+                token_endpoint="https://notion.example/token",
+                resource="https://notion.example/mcp",
+                access_token="ACCESS-TOKEN-1111",
+                refresh_token="REFRESH-TOKEN-1111",
+                expires_at=4_000_000_000.0,
+                granted_at=1_800_000_000.0,
+            )
+        )
+        built: list[str] = []
+
+        def factory(server_id, server_config):
+            built.append(server_id)
+            return StreamableHttpMcpClient(server_id, server_config, env={}, transport_factory=server.transport)
+
+        async def fast_sleep(seconds: float) -> None:
+            await asyncio.sleep(0.01)
+
+        hub = McpHub(
+            _config(workspace, {"notion": _oauth_server(store_path, connect_timeout_seconds=5.0)}),
+            client_factory=factory,
+            sleep=fast_sleep,
+        )
+        await hub.start()
+        self.assertEqual(hub.state("notion"), McpServerState.CONNECTED)
+        return hub, built
+
+    async def test_server_json_rpc_error_fails_the_call_but_keeps_the_session(self) -> None:
+        server = _RpcErrorServer(tools=[tool_spec("alpha")], call_handler=lambda name, args: text_result("ok"))
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, built = await self._start(tmp, server)
+            try:
+                server.call_error = (-32602, "Invalid params: page_id is required")
+                with self.assertRaises(McpProtocolError) as caught:
+                    await hub.call_tool("notion", "alpha", {})
+                self.assertNotIsInstance(caught.exception, McpConnectionError)
+                await asyncio.sleep(0.05)
+                self.assertEqual(hub.state("notion"), McpServerState.CONNECTED)
+                self.assertEqual(built, ["notion"])
+
+                # The same session serves the next call.
+                server.call_error = None
+                self.assertEqual((await hub.call_tool("notion", "alpha", {})).text_blocks, ("ok",))
+                self.assertEqual(built, ["notion"])
+            finally:
+                await hub.stop()
+
+    async def test_server_ending_the_session_counts_as_lost(self) -> None:
+        server = _RpcErrorServer(tools=[tool_spec("alpha")], call_handler=lambda name, args: text_result("ok"))
+        with tempfile.TemporaryDirectory() as tmp:
+            hub, built = await self._start(tmp, server)
+            try:
+                # A 404 on an established session means the server dropped it.
+                server.call_status = 404
+                with self.assertRaises(McpConnectionError):
+                    await hub.call_tool("notion", "alpha", {})
+                self.assertIsNot(hub.state("notion"), McpServerState.CONNECTED)
+                server.call_status = None
+                for _ in range(300):
+                    if hub.state("notion") is McpServerState.CONNECTED:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(hub.state("notion"), McpServerState.CONNECTED)
+                self.assertEqual(built, ["notion", "notion"])
             finally:
                 await hub.stop()
 

@@ -30,6 +30,7 @@ from mcp.client.auth.oauth2 import OAuthClientProvider
 from mcp.client.session import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import AuthorizationCodeResult, OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from mcp.shared.exceptions import MCPError
 
 from provider.mcp.errors import (
     McpAuthError,
@@ -253,6 +254,25 @@ def _status_code_in_chain(exc: BaseException) -> int | None:
     return None
 
 
+def _classify_rpc_error(error: MCPError, prefix: str, detail: str) -> McpError:
+    """Map the SDK's JSON-RPC error onto lost-session vs. failed-request.
+
+    Only a lost session may become ``McpConnectionError``: the hub answers that by
+    taking the server offline and reconnecting. The SDK reports a lost session as
+    ``CONNECTION_CLOSED`` (the stream ended or the POST raised) or, for a 404 on an
+    established session, as ``INVALID_REQUEST`` "Session terminated". Any other
+    code is the server answering this one request (invalid params, a tool-side
+    failure, a 5xx stand-in): the call fails and the session stays up.
+    """
+    if error.code == mcp_types.CONNECTION_CLOSED:
+        return McpConnectionError(f"{prefix}: {detail}")
+    if error.code == mcp_types.INVALID_REQUEST and error.message == "Session terminated":
+        return McpConnectionError(f"{prefix}: {detail}")
+    if error.code == mcp_types.REQUEST_TIMEOUT:
+        return McpTimeoutError(f"{prefix}: timed out")
+    return McpProtocolError(f"{prefix}: {detail}")
+
+
 class StreamableHttpMcpClient:
     """One connection to one Streamable HTTP MCP server.
 
@@ -392,8 +412,12 @@ class StreamableHttpMcpClient:
             return McpTimeoutError(f"{prefix}: timed out")
         if _any(httpx2.TransportError):
             return McpConnectionError(f"{prefix}: {detail}")
+        rpc_error = next((e for e in chain if isinstance(e, MCPError)), None)
+        if rpc_error is not None:
+            return _classify_rpc_error(rpc_error, prefix, detail)
         if _any(ValueError, TypeError, KeyError):
             return McpProtocolError(f"{prefix}: {detail}")
+        # Anything else (e.g. anyio's closed/broken stream) means the session is gone.
         return McpConnectionError(f"{prefix}: {detail}")
 
     def _login_required_error(self, action: str) -> McpLoginRequiredError | None:
