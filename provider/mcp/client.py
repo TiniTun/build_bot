@@ -18,6 +18,7 @@ DELETE.
 import asyncio
 import logging
 import os
+import threading
 from typing import Any, Callable, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -31,11 +32,14 @@ from provider.mcp.errors import (
     McpConfigError,
     McpConnectionError,
     McpError,
+    McpLoginRequiredError,
     McpNotConnectedError,
     McpProtocolError,
     McpTimeoutError,
 )
 from provider.mcp.models import McpCallResult, McpServerInfo, McpToolDef
+from provider.mcp.oauth import McpOAuthAuth
+from provider.mcp.oauth_store import OAuthStore
 from utils.mcp_config import McpServerConfig
 
 logger = logging.getLogger(__name__)
@@ -97,20 +101,91 @@ class _StatusWatchingTransport(httpx2.AsyncBaseTransport):
 
 
 class _Redactor:
-    """Scrubs known secret values out of any text that becomes an error message."""
+    """Scrubs known secret values out of any text that becomes an error message.
 
-    def __init__(self) -> None:
-        self._secrets: list[str] = []
+    A redactor built with ``shared`` also feeds every secret it learns into that
+    one, so the process-wide log filter can scrub secrets from every client.
+    Logging can run on other threads, so mutation and iteration are locked.
+    """
+
+    def __init__(self, shared: "_Redactor | None" = None) -> None:
+        # A dict keeps insertion order and drops duplicates (a refreshed token
+        # is reported once per adoption).
+        self._secrets: dict[str, None] = {}
+        self._lock = threading.Lock()
+        self._shared = shared
 
     def add(self, secret: str | None) -> None:
         # Very short values would redact harmless substrings; a real token is long.
         if secret and len(secret) >= 6:
-            self._secrets.append(secret)
+            with self._lock:
+                self._secrets[secret] = None
+            if self._shared is not None:
+                self._shared.add(secret)
 
     def scrub(self, text: str) -> str:
-        for secret in self._secrets:
+        with self._lock:
+            secrets = tuple(self._secrets)
+        for secret in secrets:
             text = text.replace(secret, "***")
         return text
+
+
+# The one process-wide redactor: every client's redactor feeds it, and
+# ``SecretScrubFilter`` reads it. It only ever accumulates secret values.
+_SHARED_REDACTOR = _Redactor()
+
+# Loggers that can see request data or token material. Filters on a logger do not
+# apply to records propagated from its children, so the project's own MCP module
+# loggers are listed individually alongside the ``provider.mcp`` package logger.
+SCRUBBED_LOGGERS = (
+    "mcp.client.auth",
+    "mcp.client.streamable_http",
+    "provider.mcp",
+    "provider.mcp.client",
+    "provider.mcp.hub",
+    "provider.mcp.oauth",
+    "provider.mcp.oauth_store",
+)
+
+
+class SecretScrubFilter(logging.Filter):
+    """Replaces known secrets in a log record's message, args and traceback.
+
+    The message is rendered with its args first, so a secret passed as a ``%s``
+    argument is caught too. A traceback is formatted into ``exc_text`` and
+    scrubbed; ``exc_info`` is then dropped so no formatter re-renders it raw.
+    """
+
+    def __init__(self, redactor: _Redactor) -> None:
+        super().__init__()
+        self._redactor = redactor
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        scrub = self._redactor.scrub
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError):
+            # Malformed format/args: keep both visible, but scrubbed.
+            message = f"{record.msg} {record.args!r}"
+        record.msg = scrub(message)
+        record.args = None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        record.exc_info = None
+        if record.exc_text:
+            record.exc_text = scrub(record.exc_text)
+        if record.stack_info:
+            record.stack_info = scrub(record.stack_info)
+        return True
+
+
+def install_secret_scrub_filter() -> None:
+    """Attach the shared ``SecretScrubFilter`` to each ``SCRUBBED_LOGGERS`` entry once."""
+    for name in SCRUBBED_LOGGERS:
+        target = logging.getLogger(name)
+        if not any(isinstance(f, SecretScrubFilter) for f in target.filters):
+            target.addFilter(SecretScrubFilter(_SHARED_REDACTOR))
 
 
 def _leaf_exceptions(exc: BaseException) -> list[BaseException]:
@@ -164,7 +239,9 @@ class StreamableHttpMcpClient:
     The Bearer token is attached to the ``httpx2.AsyncClient`` rather than to a
     single request, so every exchange the transport makes in the session — the
     initialize POST, tool listing, tool calls, the resumption/notification GET
-    stream, and the terminating DELETE — carries ``Authorization``.
+    stream, and the terminating DELETE — carries ``Authorization``. With
+    ``auth: oauth`` configured, an ``McpOAuthAuth`` supplies (and refreshes) that
+    header instead of a static ``token_env`` value.
     """
 
     def __init__(
@@ -174,13 +251,18 @@ class StreamableHttpMcpClient:
         *,
         env: Mapping[str, str] | None = None,
         transport_factory: Callable[[], httpx2.AsyncBaseTransport] | None = None,
+        oauth_auth: McpOAuthAuth | None = None,
     ) -> None:
         self.server_id = server_id
         self._config = config
         self._env: Mapping[str, str] = os.environ if env is None else env
         self._transport_factory = transport_factory
 
-        self._redactor = _Redactor()
+        install_secret_scrub_filter()
+        self._redactor = _Redactor(shared=_SHARED_REDACTOR)
+        if oauth_auth is None and config.auth is not None:
+            oauth_auth = McpOAuthAuth(OAuthStore(config.auth.token_store), on_secret=self._redactor.add)
+        self._oauth_auth = oauth_auth
         self._session: ClientSession | None = None
         self._info: McpServerInfo | None = None
         self._runner: asyncio.Task[None] | None = None
@@ -239,10 +321,16 @@ class StreamableHttpMcpClient:
     def _auth_headers(self, token: str | None) -> dict[str, str]:
         return {"Authorization": f"Bearer {token}"} if token else {}
 
-    def _new_http_client(self, headers: Mapping[str, str], timeout: httpx2.Timeout) -> httpx2.AsyncClient:
+    def _new_http_client(
+        self,
+        headers: Mapping[str, str],
+        timeout: httpx2.Timeout,
+        auth: httpx2.Auth | None = None,
+    ) -> httpx2.AsyncClient:
         inner = self._transport_factory() if self._transport_factory is not None else httpx2.AsyncHTTPTransport()
         return httpx2.AsyncClient(
             headers=dict(headers),
+            auth=auth,
             timeout=timeout,
             # Redirects are refused: following one could replay the Authorization
             # header to a host the operator never configured.
@@ -268,6 +356,9 @@ class StreamableHttpMcpClient:
                 return candidate
 
         prefix = f"[{self.server_id}] {action} failed"
+        login_error = self._login_required_error(action)
+        if login_error is not None:
+            return login_error
         detail = self._redactor.scrub("; ".join(f"{type(e).__name__}: {e}" for e in chain[:3]))
 
         status = _status_code_in_chain(exc) or self._last_auth_rejection
@@ -284,6 +375,18 @@ class StreamableHttpMcpClient:
         if _any(ValueError, TypeError, KeyError):
             return McpProtocolError(f"{prefix}: {detail}")
         return McpConnectionError(f"{prefix}: {detail}")
+
+    def _login_required_error(self, action: str) -> McpLoginRequiredError | None:
+        """An ``McpLoginRequiredError`` if the OAuth auth has flagged a dead grant.
+
+        The SDK transport swallows exceptions raised by the auth flow, so the
+        auth's flag is the reliable signal. ``last_error`` is secret-free.
+        """
+        auth = self._oauth_auth
+        if auth is None or not auth.login_required:
+            return None
+        reason = auth.last_error or "OAuth login required"
+        return McpLoginRequiredError(f"[{self.server_id}] {action} failed: login required: {reason}")
 
     # ---- health --------------------------------------------------------
 
@@ -329,11 +432,17 @@ class StreamableHttpMcpClient:
             info = await asyncio.wait_for(asyncio.shield(self._ready), self._config.connect_timeout_seconds)
         except asyncio.TimeoutError as exc:
             await self.close()
+            login_error = self._login_required_error("connect")
+            if login_error is not None:
+                raise login_error from None
             raise McpTimeoutError(
                 f"[{self.server_id}] connect timed out after {self._config.connect_timeout_seconds}s"
             ) from exc
-        except Exception:
+        except Exception as exc:
             await self.close()
+            login_error = self._login_required_error("connect")
+            if login_error is not None and not isinstance(exc, McpLoginRequiredError):
+                raise login_error from None
             raise
 
         self._info = info
@@ -348,7 +457,7 @@ class StreamableHttpMcpClient:
             connect=self._config.connect_timeout_seconds,
         )
         try:
-            async with self._new_http_client(headers, timeout) as http_client:
+            async with self._new_http_client(headers, timeout, self._oauth_auth) as http_client:
                 async with streamable_http_client(url, http_client=http_client) as (
                     read_stream,
                     write_stream,

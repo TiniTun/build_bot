@@ -21,6 +21,13 @@ class McpAuthError(McpError):
     """The Bearer token is missing, or the server rejected authentication."""
 
 
+class McpLoginRequiredError(McpAuthError):
+    """The OAuth grant is missing or dead; an operator must run the login command.
+
+    Retrying cannot help until a new grant is stored.
+    """
+
+
 class McpConnectionError(McpError):
     """Transport-level failure: DNS, refused connection, health probe, stream loss."""
 
