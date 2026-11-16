@@ -153,30 +153,77 @@ class TodoistProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen["auth"], "Bearer tok")
         self.assertEqual(seen["body"], {"text": "Buy milk tomorrow"})
 
-    async def test_list_today_maps_tasks_and_limits(self) -> None:
+    async def test_list_today_uses_api_v1_filter_endpoint(self) -> None:
+        seen = {}
+
         def handler(request: httpx.Request) -> httpx.Response:
-            self.assertEqual(request.url.params.get("filter"), "today")
+            seen["path"] = request.url.path
+            seen["params"] = dict(request.url.params)
             return httpx.Response(
                 200,
-                json=[
-                    {"id": 1, "content": "One", "priority": 4, "labels": ["work"],
-                     "due": {"string": "today", "date": "2026-06-25"}},
-                    {"id": 2, "content": "Two"},
-                    {"id": 3, "content": "Three"},
-                ],
+                json={
+                    "results": [
+                        {"id": "6X7rM8997g3RQmvh", "content": "One", "priority": 4,
+                         "labels": ["work"], "checked": False,
+                         "due": {"string": "today", "date": "2026-06-25"}},
+                        {"id": "6X7rfFVPjhvv84XG", "content": "Two", "checked": True},
+                    ],
+                    "next_cursor": None,
+                },
             )
 
         provider = _todoist(handler)
-        tasks = await provider.list_today(2)
-        self.assertEqual(len(tasks), 2)
-        self.assertEqual(tasks[0].id, "1")
+        tasks = await provider.list_today(10)
+        self.assertEqual(seen["path"], "/api/v1/tasks/filter")
+        self.assertEqual(seen["params"], {"query": "today", "limit": "10"})
+        self.assertEqual([t.id for t in tasks], ["6X7rM8997g3RQmvh", "6X7rfFVPjhvv84XG"])
         self.assertEqual(tasks[0].due_string, "today")
         self.assertEqual(tasks[0].labels, ["work"])
+        self.assertFalse(tasks[0].is_completed)
+        self.assertTrue(tasks[1].is_completed)
+
+    async def test_list_follows_cursor_until_limit(self) -> None:
+        cursors = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            cursor = request.url.params.get("cursor")
+            cursors.append(cursor)
+            if cursor is None:
+                return httpx.Response(
+                    200,
+                    json={"results": [{"id": "a", "content": "A"}, {"id": "b", "content": "B"}],
+                          "next_cursor": "page2"},
+                )
+            return httpx.Response(
+                200,
+                json={"results": [{"id": "c", "content": "C"}, {"id": "d", "content": "D"}],
+                      "next_cursor": "page3"},
+            )
+
+        provider = _todoist(handler)
+        tasks = await provider.search("#Work", 3)
+        self.assertEqual([t.id for t in tasks], ["a", "b", "c"])
+        self.assertEqual(cursors, [None, "page2"])
+
+    async def test_list_stops_when_no_next_cursor(self) -> None:
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request.url.params.get("limit"))
+            return httpx.Response(
+                200, json={"results": [{"id": "a", "content": "A"}], "next_cursor": None}
+            )
+
+        provider = _todoist(handler)
+        tasks = await provider.list_overdue(500)
+        self.assertEqual([t.id for t in tasks], ["a"])
+        self.assertEqual(calls, ["200"])
 
     async def test_update_sends_only_changed_fields(self) -> None:
         seen = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
+            seen["url"] = str(request.url)
             seen["body"] = json.loads(request.content)
             return httpx.Response(200, json={"id": 9, "content": "Renamed"})
 
@@ -185,6 +232,7 @@ class TodoistProviderTests(unittest.IsolatedAsyncioTestCase):
             TaskUpdateRequest(task_id="9", content="Renamed", priority=3)
         )
         self.assertEqual(task.content, "Renamed")
+        self.assertEqual(seen["url"], "https://api.todoist.com/api/v1/tasks/9")
         self.assertEqual(seen["body"], {"content": "Renamed", "priority": 3})
 
     async def test_complete_and_delete(self) -> None:
@@ -197,8 +245,8 @@ class TodoistProviderTests(unittest.IsolatedAsyncioTestCase):
         provider = _todoist(handler)
         await provider.complete("5")
         await provider.delete("5")
-        self.assertIn(("POST", "https://api.todoist.com/rest/v2/tasks/5/close"), seen)
-        self.assertIn(("DELETE", "https://api.todoist.com/rest/v2/tasks/5"), seen)
+        self.assertIn(("POST", "https://api.todoist.com/api/v1/tasks/5/close"), seen)
+        self.assertIn(("DELETE", "https://api.todoist.com/api/v1/tasks/5"), seen)
 
     async def test_bulk_update_complete_applies_each(self) -> None:
         seen = []

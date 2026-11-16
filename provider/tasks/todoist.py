@@ -1,6 +1,8 @@
 """Todoist provider implementing the ``TaskProvider`` protocol.
 
-Talks to the Todoist REST API v2 and API v1 quick-add over ``httpx``.
+Talks to the Todoist unified API v1 over ``httpx``. REST v2 was retired and
+answers ``410 Gone``. List endpoints wrap tasks in ``results`` and paginate with
+``next_cursor``; ``_list`` follows the cursor until ``limit`` tasks are read.
 The API token is read from the environment variable named in config so it never
 lives in config files or reaches the LLM. ``AuthMissingError`` is raised before
 any request when the token is absent.
@@ -35,8 +37,9 @@ if TYPE_CHECKING:
     from utils.config import Config, TasksProviderConfig
 
 
-REST_BASE = "https://api.todoist.com/rest/v2"
 API_V1_BASE = "https://api.todoist.com/api/v1"
+# Todoist caps a page of results at 200 tasks.
+MAX_PAGE_SIZE = 200
 
 
 def _map_status_error(exc: httpx.HTTPStatusError) -> Exception:
@@ -52,7 +55,7 @@ def _map_status_error(exc: httpx.HTTPStatusError) -> Exception:
 
 
 def _to_task(data: dict[str, Any], default_minutes: int) -> Task:
-    """Map a Todoist REST task object to the domain ``Task`` model."""
+    """Map a Todoist API v1 task object to the domain ``Task`` model."""
     due = data.get("due") or {}
     labels = list(data.get("labels", []) or [])
     labelled = parse_duration_label(labels)
@@ -66,10 +69,19 @@ def _to_task(data: dict[str, Any], default_minutes: int) -> Task:
         labels=labels,
         due_string=due.get("string"),
         due_date=due.get("date"),
-        is_completed=bool(data.get("is_completed", False)),
+        is_completed=_is_completed(data),
         url=data.get("url"),
         estimated_minutes=labelled if labelled is not None else default_minutes,
         duration_assumed=labelled is None,
+    )
+
+
+def _is_completed(data: dict[str, Any]) -> bool:
+    """API v1 reports completion as ``checked``; older shapes used ``is_completed``."""
+    return bool(
+        data.get("checked")
+        or data.get("is_completed")
+        or data.get("completed_at")
     )
 
 
@@ -117,11 +129,26 @@ class TodoistTaskProvider:
         return response
 
     async def _list(self, filter: str, limit: int) -> list[Task]:
-        response = await self._request(
-            "GET", f"{REST_BASE}/tasks", params={"filter": filter}
-        )
-        items = response.json() or []
-        return [_to_task(item, self._provider_cfg.default_duration_minutes) for item in items[:limit]]
+        """Read up to ``limit`` tasks matching a Todoist filter query."""
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        while len(items) < limit:
+            params: dict[str, Any] = {
+                "query": filter,
+                "limit": min(limit - len(items), MAX_PAGE_SIZE),
+            }
+            if cursor:
+                params["cursor"] = cursor
+            response = await self._request(
+                "GET", f"{API_V1_BASE}/tasks/filter", params=params
+            )
+            page = response.json() or {}
+            items.extend(page.get("results") or [])
+            cursor = page.get("next_cursor")
+            if not cursor:
+                break
+        default_minutes = self._provider_cfg.default_duration_minutes
+        return [_to_task(item, default_minutes) for item in items[:limit]]
 
     async def quick_add(self, text: str) -> Task:
         response = await self._request(
@@ -147,16 +174,16 @@ class TodoistTaskProvider:
     async def update(self, request: TaskUpdateRequest) -> Task:
         response = await self._request(
             "POST",
-            f"{REST_BASE}/tasks/{request.task_id}",
+            f"{API_V1_BASE}/tasks/{request.task_id}",
             json=request.changed_fields(),
         )
         return _to_task(response.json(), self._provider_cfg.default_duration_minutes)
 
     async def complete(self, task_id: str) -> None:
-        await self._request("POST", f"{REST_BASE}/tasks/{task_id}/close")
+        await self._request("POST", f"{API_V1_BASE}/tasks/{task_id}/close")
 
     async def delete(self, task_id: str) -> None:
-        await self._request("DELETE", f"{REST_BASE}/tasks/{task_id}")
+        await self._request("DELETE", f"{API_V1_BASE}/tasks/{task_id}")
 
     async def bulk_update(self, request: BulkTaskUpdateRequest) -> int:
         """Apply one operation across every task id, returning the count done."""
