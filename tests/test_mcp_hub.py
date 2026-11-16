@@ -1,6 +1,7 @@
 """Lifecycle tests for the process-level MCP hub."""
 
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,11 +9,13 @@ from pathlib import Path
 from provider.mcp.errors import (
     McpAuthError,
     McpConnectionError,
+    McpLoginRequiredError,
     McpNotConnectedError,
     McpTimeoutError,
 )
 from provider.mcp.hub import McpHub, McpServerState
 from provider.mcp.models import McpServerInfo
+from provider.mcp.oauth_store import OAuthGrant, OAuthStore
 from tests.helpers import make_workspace
 from tests.mcp_fakes import FakeMcpClient, fake_tool
 from utils.config import Config
@@ -383,6 +386,9 @@ class _RecordingHub:
     async def stop(self) -> None:
         self.order.append("hub.stop")
 
+    def set_notice_callback(self, callback) -> None:
+        self.order.append("hub.set_notice_callback" if callback is not None else "hub.clear_notice_callback")
+
     def snapshots(self) -> dict:
         return {}
 
@@ -432,6 +438,7 @@ class LifecycleOrderingTests(unittest.IsolatedAsyncioTestCase):
                 order,
                 [
                     "workers.setup",
+                    "hub.set_notice_callback",
                     "hub.start",
                     "workers.start",
                     "monitor",
@@ -488,6 +495,325 @@ class LifecycleOrderingTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertLess(order.index("hub.start"), order.index("workers.start"))
             self.assertEqual(order[-1], "hub.stop")
+
+
+class _NoticeRecorder:
+    """Async notice callback that records ``(server_id, kind)`` pairs."""
+
+    def __init__(self, delivered: bool = True) -> None:
+        self.notices: list[tuple[str, str]] = []
+        self.delivered = delivered
+
+    async def __call__(self, server_id: str, kind: str) -> bool:
+        self.notices.append((server_id, kind))
+        return self.delivered
+
+
+class _CountingSleep:
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    async def sleep(self, seconds: float) -> None:
+        self.delays.append(seconds)
+        await asyncio.sleep(0)
+
+
+async def _spin(times: int = 20) -> None:
+    for _ in range(times):
+        await asyncio.sleep(0)
+
+
+def _oauth_server(store: Path, **overrides) -> dict:
+    base = {
+        "url": "https://notion.example/mcp",
+        "auth": {"type": "oauth", "token_store": str(store)},
+        "allowed_tools": ["alpha"],
+        "reconnect_initial_seconds": 1.0,
+        "reconnect_max_seconds": 60.0,
+    }
+    base.update(overrides)
+    return base
+
+
+def _login_error() -> McpLoginRequiredError:
+    return McpLoginRequiredError("[notion] login required")
+
+
+class HubLoginRequiredTests(unittest.IsolatedAsyncioTestCase):
+    async def test_login_required_state_and_single_notice(self) -> None:
+        client = FakeMcpClient("notion", connect_error=_login_error())
+        sleeper = _CountingSleep()
+        notices = _NoticeRecorder()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            store = Path(tmp) / "notion.json"
+            factory = _FactoryRecorder({"notion": client})
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(store)}),
+                client_factory=factory,
+                sleep=sleeper.sleep,
+                jitter=lambda: 1.0,
+            )
+            hub.set_notice_callback(notices)
+            await hub.start()
+            await _spin()
+            # A second reconnect cycle: the store changed, the grant is still dead.
+            store.write_text("{}")
+            os.utime(store, (1000.0, 1000.0))
+            await _spin()
+
+            self.assertEqual(factory.built, ["notion", "notion"])
+            self.assertEqual(hub.state("notion"), McpServerState.LOGIN_REQUIRED)
+            self.assertIsNone(hub.snapshot("notion"))
+            self.assertEqual(notices.notices, [("notion", "login_required")])
+            await hub.stop()
+
+    async def test_login_required_no_bring_up_until_store_changes(self) -> None:
+        client = FakeMcpClient("notion", tools=(fake_tool("notion", "alpha"),), connect_error=_login_error())
+        sleeper = _CountingSleep()
+        notices = _NoticeRecorder()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            store = Path(tmp) / "notion.json"
+            factory = _FactoryRecorder({"notion": client})
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(store)}),
+                client_factory=factory,
+                sleep=sleeper.sleep,
+                jitter=lambda: 1.0,
+            )
+            hub.set_notice_callback(notices)
+            await hub.start()
+            await _spin(40)
+
+            # Many poll cycles at max backoff, but no new client and no network.
+            self.assertEqual(factory.built, ["notion"])
+            self.assertEqual(client.connect_calls, 1)
+            self.assertGreaterEqual(len(sleeper.delays), 3)
+            self.assertTrue(all(d == 60.0 for d in sleeper.delays))
+            self.assertEqual(hub.state("notion"), McpServerState.LOGIN_REQUIRED)
+
+            # mcp-login writes the store: the next poll brings the server up.
+            client.connect_error = None
+            store.write_text("{}")
+            await _spin()
+            self.assertEqual(factory.built, ["notion", "notion"])
+            self.assertEqual(hub.state("notion"), McpServerState.CONNECTED)
+            self.assertTrue(hub.is_tool_available("notion", "alpha"))
+
+            # A later, new incident (a call hits a dead grant) notifies again.
+            client.call_error = _login_error()
+            with self.assertRaises(McpLoginRequiredError):
+                await hub.call_tool("notion", "alpha", {})
+            await _spin()
+            self.assertEqual(hub.state("notion"), McpServerState.LOGIN_REQUIRED)
+            self.assertEqual(notices.notices, [("notion", "login_required")] * 2)
+            await hub.stop()
+
+    async def test_undelivered_login_notice_is_resent_at_most_hourly(self) -> None:
+        now = [1_800_000_000.0]
+        client = FakeMcpClient("notion", connect_error=_login_error())
+        notices = _NoticeRecorder(delivered=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(Path(tmp) / "notion.json")}),
+                client_factory=_FactoryRecorder({"notion": client}),
+                clock=lambda: now[0],
+                sleep=_CountingSleep().sleep,
+            )
+            hub.set_notice_callback(notices)
+            await hub.start()
+            await _spin(40)
+            # Many polls within the hour: no re-send yet.
+            self.assertEqual(notices.notices, [("notion", "login_required")])
+
+            now[0] += 3600
+            await _spin(40)
+            self.assertEqual(notices.notices, [("notion", "login_required")] * 2)
+
+            # Delivered this time: never re-sent again for this incident.
+            notices.delivered = True
+            now[0] += 3600
+            await _spin(40)
+            self.assertEqual(len(notices.notices), 3)
+            now[0] += 3600
+            await _spin(40)
+            self.assertEqual(len(notices.notices), 3)
+            await hub.stop()
+
+    async def test_refresh_cap_warning_once(self) -> None:
+        now = 1_800_000_000.0
+        day = 86400.0
+        client = FakeMcpClient("notion", tools=(fake_tool("notion", "alpha"),))
+        sleeper = _CountingSleep()
+        notices = _NoticeRecorder()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            store = Path(tmp) / "notion.json"
+            OAuthStore(store).save(_grant(granted_at=now - 167 * day))
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(store)}),
+                client_factory=_FactoryRecorder({"notion": client}),
+                clock=lambda: now,
+                sleep=sleeper.sleep,
+            )
+            hub.set_notice_callback(notices)
+            await hub.start()
+            await _spin()
+            self.assertEqual(notices.notices, [("notion", "refresh_cap_soon")])
+
+            # A second bring-up for the same grant does not warn again.
+            client.call_error = McpNotConnectedError("[notion] stream lost")
+            with self.assertRaises(McpNotConnectedError):
+                await hub.call_tool("notion", "alpha", {})
+            client.call_error = None
+            await _spin()
+            self.assertEqual(hub.state("notion"), McpServerState.CONNECTED)
+            self.assertEqual(client.connect_calls, 2)
+            self.assertEqual(notices.notices, [("notion", "refresh_cap_soon")])
+            await hub.stop()
+
+    async def test_refresh_cap_not_warned_for_recent_grant(self) -> None:
+        now = 1_800_000_000.0
+        client = FakeMcpClient("notion", tools=(fake_tool("notion", "alpha"),))
+        notices = _NoticeRecorder()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            store = Path(tmp) / "notion.json"
+            OAuthStore(store).save(_grant(granted_at=now - 165 * 86400.0))
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(store)}),
+                client_factory=_FactoryRecorder({"notion": client}),
+                clock=lambda: now,
+            )
+            hub.set_notice_callback(notices)
+            await hub.start()
+            await _spin()
+            self.assertEqual(notices.notices, [])
+            await hub.stop()
+
+    async def test_other_servers_unaffected(self) -> None:
+        notion = FakeMcpClient("notion", connect_error=_login_error())
+        movies = FakeMcpClient("movies_db", tools=(fake_tool("movies_db", "alpha"),))
+        sleeper = _CountingSleep()
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            store = Path(tmp) / "notion.json"
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(store), "movies_db": _server()}),
+                client_factory=_FactoryRecorder({"notion": notion, "movies_db": movies}),
+                sleep=sleeper.sleep,
+            )
+            hub.set_notice_callback(_NoticeRecorder())
+            await hub.start()
+            await _spin()
+            self.assertEqual(hub.state("notion"), McpServerState.LOGIN_REQUIRED)
+            self.assertEqual(hub.state("movies_db"), McpServerState.CONNECTED)
+            self.assertTrue(hub.is_tool_available("movies_db", "alpha"))
+            result = await hub.call_tool("movies_db", "alpha", {})
+            self.assertFalse(result.is_error)
+            await hub.stop()
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    async def test_unreadable_token_store_does_not_abort_startup(self) -> None:
+        from provider.mcp.client import StreamableHttpMcpClient
+        from tests.mcp_fakes import FakeMcpHttpServer, tool_spec
+
+        movies = FakeMcpClient("movies_db", tools=(fake_tool("movies_db", "alpha"),))
+        notion_server = FakeMcpHttpServer(tools=[tool_spec("alpha")])
+
+        def factory(server_id: str, config):
+            if server_id == "movies_db":
+                return movies
+            return StreamableHttpMcpClient(server_id, config, env={}, transport_factory=notion_server.transport)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            store_dir = Path(tmp) / "secrets"
+            store_dir.mkdir()
+            (store_dir / "notion.json").write_text("{}")
+            os.chmod(store_dir, 0)
+            try:
+                hub = McpHub(
+                    _config(workspace, {"notion": _oauth_server(store_dir / "notion.json"), "movies_db": _server()}),
+                    client_factory=factory,
+                    sleep=_CountingSleep().sleep,
+                )
+                hub.set_notice_callback(_NoticeRecorder())
+                with self.assertLogs("provider.mcp.oauth_store", level="WARNING") as logs:
+                    await hub.start()
+                    await _spin()
+                self.assertIn(hub.state("notion"), (McpServerState.LOGIN_REQUIRED, McpServerState.DEGRADED))
+                self.assertEqual(hub.state("movies_db"), McpServerState.CONNECTED)
+                reconnect = hub._servers["notion"].reconnect_task
+                self.assertIsNotNone(reconnect)
+                self.assertFalse(reconnect.done())
+                self.assertTrue(all("{}" not in line for line in logs.output))
+                self.assertEqual(notion_server.requests, [])
+                await hub.stop()
+            finally:
+                os.chmod(store_dir, 0o700)
+
+    async def test_failing_notice_callback_is_logged_not_raised(self) -> None:
+        client = FakeMcpClient("notion", connect_error=_login_error())
+
+        async def broken(server_id: str, kind: str) -> None:
+            raise RuntimeError("telegram down")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            hub = McpHub(
+                _config(workspace, {"notion": _oauth_server(Path(tmp) / "notion.json")}),
+                client_factory=_FactoryRecorder({"notion": client}),
+                sleep=_CountingSleep().sleep,
+            )
+            hub.set_notice_callback(broken)
+            with self.assertLogs("provider.mcp.hub", level="ERROR"):
+                await hub.start()
+                await _spin()
+            self.assertEqual(hub.state("notion"), McpServerState.LOGIN_REQUIRED)
+            await hub.stop()
+
+    async def test_mcp_command_shows_login_hint(self) -> None:
+        from types import SimpleNamespace
+
+        from core.commands.handlers import McpCommand
+        from tests.helpers import make_context
+
+        client = FakeMcpClient("notion", connect_error=_login_error())
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            context = make_context(workspace)
+            context.config.mcp = McpConfig.model_validate(
+                {"servers": {"notion": _oauth_server(Path(tmp) / "notion.json")}}
+            )
+            context.mcp_hub = McpHub(
+                context.config,
+                client_factory=_FactoryRecorder({"notion": client}),
+                sleep=_CountingSleep().sleep,
+            )
+            await context.mcp_hub.start()
+            session = SimpleNamespace(shared_context=context)
+            for args in ("", "notion"):
+                out = await McpCommand().execute(args, session)
+                self.assertIn("login_required", out)
+                self.assertIn("build-bot mcp-login notion", out)
+            await context.mcp_hub.stop()
+
+
+def _grant(*, granted_at: float) -> OAuthGrant:
+    return OAuthGrant(
+        client_id="client",
+        client_secret=None,
+        redirect_uri="http://127.0.0.1:33418/callback",
+        token_endpoint="https://notion.example/token",
+        resource="https://notion.example/mcp",
+        access_token="access",
+        refresh_token="refresh",
+        expires_at=granted_at + 3600,
+        granted_at=granted_at,
+    )
 
 
 if __name__ == "__main__":

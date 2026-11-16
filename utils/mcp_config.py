@@ -11,6 +11,7 @@ hint and can never widen what these models allow.
 """
 
 import re
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -36,6 +37,43 @@ McpToolConfirmation = Literal["none", "host_before_call", "server_challenge"]
 McpToolRetry = Literal["safe", "never"]
 
 
+class McpOAuthConfig(BaseModel):
+    """OAuth (authorization code + PKCE) settings for a remote MCP server.
+
+    ``token_store`` holds the persisted tokens; a relative path resolves against
+    the workspace root. ``callback_port`` is the local loopback port for the
+    one-time browser authorization callback.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["oauth"]
+    token_store: Path
+    callback_port: int = Field(33418, ge=1024, le=65535)
+
+
+class McpArgumentRules(BaseModel):
+    """Local rules constraining the arguments the model may pass to a tool.
+
+    ``allowed_values``/``forbidden_values`` apply to top-level argument keys;
+    the ``*_property_*`` fields apply inside the ``properties`` mapping.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    allowed_keys: list[str] | None = None
+    allowed_values: dict[str, list[Any]] = Field(default_factory=dict)
+    forbidden_values: dict[str, list[Any]] = Field(default_factory=dict)
+    forbidden_property_values: dict[str, list[Any]] = Field(default_factory=dict)
+    forbid_null_properties: bool = False
+    # Rules for mapping (or list-of-mapping) arguments, keyed by argument name,
+    # e.g. the items of notion-create-pages' ``pages`` list.
+    nested: dict[str, "McpArgumentRules"] = Field(default_factory=dict)
+
+
+McpArgumentRules.model_rebuild()
+
+
 class McpToolPolicy(BaseModel):
     """Local per-tool policy overriding anything the server claims about a tool.
 
@@ -50,6 +88,7 @@ class McpToolPolicy(BaseModel):
     effect: McpToolEffect = "read"
     confirmation: McpToolConfirmation = "none"
     retry: McpToolRetry = "never"
+    arguments: McpArgumentRules | None = None
 
     @model_validator(mode="after")
     def retry_not_allowed_for_mutations(self) -> "McpToolPolicy":
@@ -85,6 +124,9 @@ class McpServerConfig(BaseModel):
     health_url: str | None = None
 
     token_env: str | None = None
+
+    # OAuth alternative to ``token_env``; the two are mutually exclusive.
+    auth: McpOAuthConfig | None = None
 
     connect_timeout_seconds: float = Field(default=10.0, gt=0, le=MAX_TIMEOUT_SECONDS)
     read_timeout_seconds: float = Field(default=30.0, gt=0, le=MAX_TIMEOUT_SECONDS)
@@ -181,6 +223,8 @@ class McpServerConfig(BaseModel):
     def validate_server(self) -> "McpServerConfig":
         if (self.url is None) == (self.url_env is None):
             raise ValueError("set exactly one of 'url' or 'url_env'")
+        if self.auth is not None and self.token_env is not None:
+            raise ValueError("set at most one of 'auth' or 'token_env'")
         if self.health_url is not None and self.health_path is not None:
             raise ValueError("set at most one of 'health_url' or 'health_path'")
         if self.reconnect_max_seconds < self.reconnect_initial_seconds:
@@ -196,6 +240,11 @@ class McpServerConfig(BaseModel):
         if orphan:
             raise ValueError("tool_policies entries have no matching allowed_tools entry: " + ", ".join(orphan))
         return self
+
+    def resolve_paths(self, workspace: Path) -> None:
+        """Make a relative ``auth.token_store`` absolute against the workspace root."""
+        if self.auth is not None and not self.auth.token_store.is_absolute():
+            self.auth = self.auth.model_copy(update={"token_store": workspace / self.auth.token_store})
 
     def policy_for(self, remote_tool_name: str) -> McpToolPolicy:
         """Local policy for a remote tool; safe defaults when unspecified."""

@@ -8,6 +8,7 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
+from provider.mcp.hub import _connection_identity
 from tests.helpers import make_workspace, write_file
 from utils.config import Config
 from utils.mcp_config import McpConfig, McpServerConfig, McpToolPolicy
@@ -279,6 +280,64 @@ def _uncomment_mcp_block(text: str) -> str:
             continue
         out.append(stripped)
     return "\n".join(out)
+
+
+def _oauth_server(**overrides) -> dict:
+    base = {
+        "url": "https://mcp.notion.com/mcp",
+        "auth": {"type": "oauth", "token_store": ".secrets/mcp/notion.json"},
+    }
+    base.update(overrides)
+    return base
+
+
+class McpOAuthAndArgumentRuleTests(unittest.TestCase):
+    def test_oauth_auth_parses(self) -> None:
+        cfg = McpServerConfig.model_validate(_oauth_server())
+        self.assertIsNotNone(cfg.auth)
+        self.assertEqual(cfg.auth.callback_port, 33418)
+
+    def test_oauth_and_token_env_are_exclusive(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "at most one of 'auth' or 'token_env'"):
+            McpServerConfig.model_validate(_oauth_server(token_env="X"))
+
+    def test_oauth_token_store_resolves_against_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = make_workspace(Path(tmp))
+            config = _write_mcp_config(workspace, {"servers": {"notion": _oauth_server()}})
+            auth = config.mcp.servers["notion"].auth
+            self.assertEqual(auth.token_store, config.workspace / ".secrets/mcp/notion.json")
+
+    def test_argument_rules_parse(self) -> None:
+        policy = McpToolPolicy.model_validate(
+            {
+                "arguments": {
+                    "allowed_keys": ["page_id", "command"],
+                    "allowed_values": {"command": ["update_properties"]},
+                }
+            }
+        )
+        self.assertEqual(policy.arguments.allowed_keys, ["page_id", "command"])
+        self.assertFalse(policy.arguments.forbid_null_properties)
+        with self.assertRaises(ValidationError):
+            McpToolPolicy.model_validate({"arguments": {"bogus": 1}})
+
+    def test_nested_argument_rules_parse(self) -> None:
+        policy = McpToolPolicy.model_validate(
+            {"arguments": {"nested": {"pages": {"allowed_keys": ["content"], "nested": {"x": {}}}}}}
+        )
+        pages = policy.arguments.nested["pages"]
+        self.assertEqual(pages.allowed_keys, ["content"])
+        self.assertIn("x", pages.nested)
+        with self.assertRaises(ValidationError):
+            McpToolPolicy.model_validate({"arguments": {"nested": {"pages": {"bogus": 1}}}})
+
+    def test_connection_identity_changes_with_auth(self) -> None:
+        a = McpServerConfig.model_validate(_oauth_server())
+        b = McpServerConfig.model_validate(
+            _oauth_server(auth={"type": "oauth", "token_store": ".secrets/mcp/other.json"})
+        )
+        self.assertNotEqual(_connection_identity(a), _connection_identity(b))
 
 
 if __name__ == "__main__":

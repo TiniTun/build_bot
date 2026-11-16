@@ -7,6 +7,7 @@ import typer
 from rich.console import Console
 
 from cli.chat import chat_command
+from cli.mcp_login import DEFAULT_TIMEOUT_SECONDS, mcp_login_command
 from cli.server import server_command
 from core.skill_loader import SkillLoader
 from utils.config import Config
@@ -75,6 +76,22 @@ def chat(
 def server(ctx: typer.Context) -> None:
     """Start the 24/7 server for cron and messagebus execution."""
     server_command(ctx)
+
+
+@app.command("mcp-login")
+def mcp_login(
+    ctx: typer.Context,
+    server_id: Annotated[str, typer.Argument(help="MCP server id from the workspace config")],
+    timeout: Annotated[
+        float,
+        typer.Option("--timeout", help="Seconds to wait for the browser login"),
+    ] = DEFAULT_TIMEOUT_SECONDS,
+) -> None:
+    """Log in to an OAuth MCP server and save its token store.
+
+    Over SSH, forward the callback port first: ssh -L 33418:127.0.0.1:33418 <host>.
+    """
+    mcp_login_command(ctx, server_id, timeout)
 
 
 @app.command("migrate-memory")

@@ -16,6 +16,30 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def resolve_default_delivery_source(default_source_str: str | None) -> EventSource | None:
+    """Parse ``config.default_delivery_source``; None (logged) unless it is a platform source."""
+    if not default_source_str:
+        return None
+    try:
+        source = EventSource.from_string(default_source_str)
+    except ValueError as e:
+        logger.error(f"Invalid default_delivery_source: {e}")
+        return None
+    if not source.platform_name:
+        logger.error(f"default_delivery_source '{default_source_str}' is not a platform source")
+        return None
+    return source
+
+
+def find_channel(context: "SharedContext", platform: str) -> "Channel[Any] | None":
+    """Get the message channel for a platform."""
+    for channel in context.channels:
+        if channel.platform_name == platform:
+            return channel
+    return None
+
+
 # Retry configuration
 BACKOFF_MS = [5000, 25000, 120000, 600000]  # 5s, 25s, 2min, 10min
 MAX_RETRIES = 5
@@ -132,17 +156,7 @@ class DeliveryWorker(SubscriberWorker):
         # Try default delivery source for agent events
         default_source_str = self.context.config.default_delivery_source
         if default_source_str:
-            try:
-                source = EventSource.from_string(default_source_str)
-                if not source.platform_name:
-                    self.logger.error(
-                        f"default_delivery_source '{default_source_str}' is not a platform source"
-                    )
-                    return None
-                return source
-            except ValueError as e:
-                self.logger.error(f"Invalid default_delivery_source: {e}")
-                return None
+            return resolve_default_delivery_source(default_source_str)
         else:
             self.logger.warning(
                 f"No platform for session {session_info.id} and no default_delivery_source configured"
@@ -197,7 +211,4 @@ class DeliveryWorker(SubscriberWorker):
 
     def _get_channel(self, platform: str) -> "Channel[Any] | None":
         """Get the message channel for a platform."""
-        for channel in self.context.channels:
-            if channel.platform_name == platform:
-                return channel
-        return None
+        return find_channel(self.context, platform)

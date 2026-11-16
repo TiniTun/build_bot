@@ -5,19 +5,32 @@ about headers, pagination, and session termination reflect actual wire behavior.
 No test touches the network.
 """
 
+import io
+import logging
+import shutil
+import tempfile
+import time
 import unittest
+from pathlib import Path
 
 import httpx2
 
-from provider.mcp.client import StreamableHttpMcpClient
+from mcp.client.auth.exceptions import OAuthTokenError
+
+from provider.mcp.client import StreamableHttpMcpClient, _login_failure
 from provider.mcp.errors import (
     McpAuthError,
     McpConfigError,
     McpConnectionError,
+    McpLoginRequiredError,
     McpNotConnectedError,
     McpTimeoutError,
 )
+from provider.mcp.oauth_store import OAuthGrant, OAuthStore
+from tests.helpers import make_workspace
 from tests.mcp_fakes import FakeMcpHttpServer, text_result, tool_spec
+from utils.config import Config
+from utils.logging import setup_logging
 from utils.mcp_config import McpServerConfig
 
 MCP_URL = "http://movies-db.test:8765/mcp"
@@ -418,6 +431,192 @@ class ToolListChangedTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(seen, [])
         finally:
             await client.close()
+
+
+STORED_ACCESS = "stored-access-SECRET-x9y8z7"
+STORED_REFRESH = "stored-refresh-SECRET-q1w2e3"
+
+
+def _oauth_config(token_store: Path) -> McpServerConfig:
+    return McpServerConfig.model_validate(
+        {
+            "url": MCP_URL,
+            "auth": {"type": "oauth", "token_store": str(token_store)},
+            "allowed_tools": ["alpha"],
+        }
+    )
+
+
+def _stored_grant() -> OAuthGrant:
+    now = time.time()
+    return OAuthGrant(
+        client_id="client-id",
+        client_secret=None,
+        redirect_uri="http://127.0.0.1:33418/callback",
+        token_endpoint="http://movies-db.test:8765/token",
+        resource=MCP_URL,
+        access_token=STORED_ACCESS,
+        refresh_token=STORED_REFRESH,
+        expires_at=now + 3600,
+        granted_at=now,
+    )
+
+
+class ClientOAuthTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.store_path = self.tmp / "notion.oauth.json"
+
+    async def test_oauth_client_sends_bearer_from_store(self) -> None:
+        OAuthStore(self.store_path).save(_stored_grant())
+        server = FakeMcpHttpServer(tools=[tool_spec("alpha")], require_token=STORED_ACCESS)
+        client = StreamableHttpMcpClient(
+            "notion", _oauth_config(self.store_path), env={}, transport_factory=server.transport
+        )
+        try:
+            await client.connect()
+            await client.list_tools()
+        finally:
+            await client.close()
+        mcp_requests = server.mcp_requests()
+        self.assertTrue(mcp_requests)
+        for request in mcp_requests:
+            self.assertEqual(request.authorization, f"Bearer {STORED_ACCESS}")
+
+    async def test_oauth_client_without_store_raises_login_required(self) -> None:
+        server = FakeMcpHttpServer(tools=[tool_spec("alpha")])
+        client = StreamableHttpMcpClient(
+            "notion", _oauth_config(self.store_path), env={}, transport_factory=server.transport
+        )
+        with self.assertRaises(McpLoginRequiredError) as ctx:
+            await client.connect()
+        await client.close()
+        self.assertIsInstance(ctx.exception, McpAuthError)
+        self.assertIn("notion", str(ctx.exception))
+        self.assertEqual(server.requests, [])
+
+    async def test_oauth_health_probe_stays_unauthenticated(self) -> None:
+        OAuthStore(self.store_path).save(_stored_grant())
+        server = FakeMcpHttpServer(tools=[tool_spec("alpha")])
+        config = _oauth_config(self.store_path).model_copy(update={"health_path": "/health"})
+        client = StreamableHttpMcpClient("notion", config, env={}, transport_factory=server.transport)
+        await client.probe_health()
+        (probe,) = server.requests
+        self.assertIsNone(probe.authorization)
+
+    async def test_token_env_path_unchanged(self) -> None:
+        server = FakeMcpHttpServer(tools=[tool_spec("alpha")], require_token=TOKEN)
+        client = _client(server)
+        try:
+            await client.connect()
+        finally:
+            await client.close()
+        posts = [r for r in server.mcp_requests() if r.method == "POST"]
+        self.assertTrue(posts)
+        self.assertTrue(all(r.authorization == f"Bearer {TOKEN}" for r in posts))
+
+
+class SecretScrubLoggingTests(unittest.IsolatedAsyncioTestCase):
+    def _capture(self, logger_name: str) -> io.StringIO:
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(logging.Formatter("%(name)s %(message)s"))
+        logger = logging.getLogger(logger_name)
+        old_level = logger.level
+        logger.addHandler(handler)
+        logger.setLevel(logging.DEBUG)
+
+        def _restore() -> None:
+            logger.removeHandler(handler)
+            logger.setLevel(old_level)
+
+        self.addCleanup(_restore)
+        return stream
+
+    def _make_client_with_secret(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        store_path = tmp / "notion.oauth.json"
+        OAuthStore(store_path).save(_stored_grant())
+        StreamableHttpMcpClient("notion", _oauth_config(store_path), env={})._redactor.add(STORED_ACCESS)
+
+    async def test_sdk_logger_is_scrubbed(self) -> None:
+        self._make_client_with_secret()
+        stream = self._capture("mcp.client.streamable_http")
+        logger = logging.getLogger("mcp.client.streamable_http")
+        try:
+            raise RuntimeError(f"POST failed with Authorization: Bearer {STORED_ACCESS}")
+        except RuntimeError:
+            logger.exception("Error in post_writer for %s", STORED_ACCESS)
+        output = stream.getvalue()
+        self.assertIn("Error in post_writer", output)
+        self.assertIn("RuntimeError", output)
+        self.assertNotIn(STORED_ACCESS, output)
+        self.assertIn("***", output)
+
+    def _setup_logging_to_file(self) -> Path:
+        """Run the real ``setup_logging`` into a temp workspace; return the log file."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        config = Config.load(make_workspace(tmp))
+        root = logging.getLogger()
+        old_level, old_handlers = root.level, list(root.handlers)
+        setup_logging(config, console_output=False)
+        added = [h for h in root.handlers if h not in old_handlers]
+
+        def _restore() -> None:
+            for handler in added:
+                root.removeHandler(handler)
+                handler.close()
+            root.setLevel(old_level)
+
+        self.addCleanup(_restore)
+        return config.logging_path / "built-bot.log"
+
+    def _log_secret_with_traceback(self, logger_name: str) -> str:
+        log_file = self._setup_logging_to_file()
+        try:
+            raise RuntimeError(f"token endpoint said refresh_token={STORED_ACCESS}")
+        except RuntimeError:
+            logging.getLogger(logger_name).debug("refresh failed for %s", STORED_ACCESS, exc_info=True)
+        for handler in logging.getLogger().handlers:
+            handler.flush()
+        return log_file.read_text(encoding="utf-8")
+
+    async def test_sdk_oauth2_child_logger_is_scrubbed_in_handler_output(self) -> None:
+        self._make_client_with_secret()
+        output = self._log_secret_with_traceback("mcp.client.auth.oauth2")
+        self.assertIn("refresh failed for", output)
+        self.assertIn("RuntimeError", output)
+        self.assertNotIn(STORED_ACCESS, output)
+        self.assertIn("***", output)
+
+    async def test_handler_scrubs_a_logger_without_its_own_filter(self) -> None:
+        self._make_client_with_secret()
+        output = self._log_secret_with_traceback("some.unlisted.library")
+        self.assertIn("refresh failed for", output)
+        self.assertNotIn(STORED_ACCESS, output)
+
+    async def test_project_child_logger_is_scrubbed(self) -> None:
+        self._make_client_with_secret()
+        stream = self._capture("provider.mcp.oauth")
+        logging.getLogger("provider.mcp.oauth").warning("token %s leaked", STORED_ACCESS)
+        self.assertNotIn(STORED_ACCESS, stream.getvalue())
+
+
+class LoginFailureTests(unittest.TestCase):
+    def test_invalid_token_response_detail_is_replaced(self) -> None:
+        leaked = "secret-token-from-pydantic-input-value"
+        exc = OAuthTokenError(f"Invalid token response: 1 validation error input_value={{'access_token': '{leaked}'}}")
+        error = _login_failure("notion", exc, reused_registration=False)
+        self.assertIsInstance(error, McpAuthError)
+        self.assertNotIn(leaked, str(error))
+        self.assertIn("Invalid token response", str(error))
+
+    def test_other_token_errors_keep_their_detail(self) -> None:
+        error = _login_failure("notion", OAuthTokenError("Token exchange failed (400): bad"), reused_registration=False)
+        self.assertIn("Token exchange failed", str(error))
 
 
 if __name__ == "__main__":

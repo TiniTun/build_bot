@@ -389,7 +389,7 @@ class TaskToolExecutionTests(unittest.IsolatedAsyncioTestCase):
             import tools.task_tools as tt
 
             orig = tt.get_task_provider
-            tt.get_task_provider = lambda config: fake
+            tt.get_task_provider = lambda config, hub=None: fake
             try:
                 pairs = build_task_capabilities(context.config)
             finally:
@@ -407,7 +407,7 @@ class TaskToolExecutionTests(unittest.IsolatedAsyncioTestCase):
             import tools.task_tools as tt
 
             orig = tt.get_task_provider
-            tt.get_task_provider = lambda config: fake
+            tt.get_task_provider = lambda config, hub=None: fake
             try:
                 pairs = build_task_capabilities(context.config)
             finally:
@@ -483,7 +483,7 @@ class TaskConfirmationFlowTests(unittest.IsolatedAsyncioTestCase):
             import tools.task_tools as tt
 
             orig = tt.get_task_provider
-            tt.get_task_provider = lambda config: fake
+            tt.get_task_provider = lambda config, hub=None: fake
             try:
                 executors = build_task_confirmed_executors(context.config)
             finally:

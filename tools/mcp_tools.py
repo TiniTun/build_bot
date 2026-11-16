@@ -34,7 +34,7 @@ from provider.mcp.hub import McpHub
 from provider.mcp.models import McpCallResult, McpToolDef
 from tools.base import BaseTool, ToolErrorCode, ToolResult
 from tools.capabilities import CapabilityDef, ToolRiskLevel
-from utils.mcp_config import McpServerConfig, McpToolPolicy
+from utils.mcp_config import McpArgumentRules, McpServerConfig, McpToolPolicy
 
 if TYPE_CHECKING:
     from core.agent import AgentSession
@@ -182,6 +182,123 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _norm(value: Any) -> Any:
+    """Normalise strings (casefold + strip) so case/whitespace cannot dodge a rule."""
+    return value.casefold().strip() if isinstance(value, str) else value
+
+
+def _is_plain_scalar(value: Any) -> bool:
+    return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _matches(actual: Any, forbidden: Any) -> bool:
+    return bool(_norm(actual) == _norm(forbidden))
+
+
+def _forbidden_hit(value: Any, forbidden: list[Any]) -> bool | None:
+    """True if ``value`` (or a list element) equals a forbidden value.
+
+    None means the value cannot be compared (e.g. a mapping or nested list):
+    callers deny, since an unevaluable rule must fail closed.
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    for item in items:
+        if not _is_plain_scalar(item):
+            return None
+        if any(_matches(item, f) for f in forbidden):
+            return True
+    return False
+
+
+def _safe(name: Any) -> str:
+    """Model-chosen names are quoted and truncated so they cannot inject log lines."""
+    return repr(str(name)[:64])
+
+
+def check_arguments(rules: McpArgumentRules, arguments: Mapping[str, Any]) -> str | None:
+    """Return a denial reason for ``arguments`` under ``rules``, or None if allowed.
+
+    Fails closed: anything the rules cannot evaluate denies the call. Reasons
+    name keys and paths only, never argument values, so they are safe to log.
+
+    ``forbidden_values[k]`` matches when the argument equals a listed value, and
+    also, for mapping arguments, when any of the mapping's values equals one.
+    This covers ``notion-create-pages`` where ``parent`` may be the string
+    ``"memory"`` or an object that wraps it (``{"page_id": "memory"}``).
+
+    ``nested[k]`` applies sub-rules to a mapping argument, or to every element of
+    a list argument (a non-mapping element denies). Scalars are left to the outer
+    rules, which run first. Paths look like ``pages[0].is_skill``.
+    """
+    return _check(rules, arguments, "")
+
+
+def _check(rules: McpArgumentRules, arguments: Mapping[str, Any], path: str) -> str | None:
+    def at(key: Any) -> str:
+        return f"{path}{str(key)[:64]}"
+
+    if rules.allowed_keys is not None:
+        for key in arguments:
+            if key not in rules.allowed_keys:
+                return f"argument {_safe(at(key))} is not permitted"
+
+    for key, allowed in rules.allowed_values.items():
+        if key not in arguments:
+            continue
+        value = arguments[key]
+        if not _is_plain_scalar(value) or not any(_matches(value, a) for a in allowed):
+            return f"value of {_safe(at(key))} is not permitted"
+
+    for key, forbidden in rules.forbidden_values.items():
+        if key not in arguments:
+            continue
+        value = arguments[key]
+        if isinstance(value, Mapping):
+            hit = _forbidden_hit(list(value.values()), forbidden)
+        elif isinstance(value, (list, tuple)):
+            hit = None  # a list is never a valid shape for these keys
+        else:
+            hit = _forbidden_hit(value, forbidden)
+        if hit is None or hit:
+            return f"value of {_safe(at(key))} is not permitted"
+
+    if (rules.forbid_null_properties or rules.forbidden_property_values) and "properties" in arguments:
+        props = arguments["properties"]
+        if not isinstance(props, Mapping):
+            return f"{_safe(at('properties'))} must be an object"
+        forbidden_by_name: dict[str, list[Any]] = {}
+        for rule_name, values in rules.forbidden_property_values.items():
+            forbidden_by_name.setdefault(_norm(rule_name), []).extend(values)
+        for name, value in props.items():
+            where = _safe(f"{at('properties')}.{name}")
+            if rules.forbid_null_properties and value is None:
+                return f"property {where} may not be null"
+            forbidden = forbidden_by_name.get(_norm(name))
+            if forbidden:
+                hit = _forbidden_hit(value, forbidden)
+                if hit is None or hit:
+                    return f"value of property {where} is not permitted"
+
+    for key, sub in rules.nested.items():
+        if key not in arguments:
+            continue
+        value = arguments[key]
+        if isinstance(value, Mapping):
+            reason = _check(sub, value, f"{at(key)}.")
+            if reason is not None:
+                return reason
+        elif isinstance(value, (list, tuple)):
+            for index, item in enumerate(value):
+                if not isinstance(item, Mapping):
+                    return f"{_safe(f'{at(key)}[{index}]')} must be an object"
+                reason = _check(sub, item, f"{at(key)}[{index}].")
+                if reason is not None:
+                    return reason
+        elif value is not None:
+            return f"{_safe(at(key))} must be an object or a list of objects"
+    return None
+
+
 class McpTool(BaseTool):
     """One approved remote tool, invoked through the shared hub."""
 
@@ -214,6 +331,24 @@ class McpTool(BaseTool):
                 f"The MCP tool {self.name} is currently unavailable.",
                 user_action="Check `/mcp` for the server's state.",
             ).to_tool_content()
+
+        # Argument rules are read live so a config reload applies immediately.
+        # Only agent calls are guarded: host code calling hub.call_tool is trusted.
+        server_config = hub.server_config(self.server_id)
+        rules = server_config.policy_for(self.remote_tool_name).arguments if server_config else None
+        if rules is not None:
+            reason = check_arguments(rules, kwargs)
+            if reason is not None:
+                logger.warning(
+                    "MCP call denied by argument guard: server=%s tool=%s reason=%s",
+                    self.server_id,
+                    self.remote_tool_name,
+                    reason,
+                )
+                return ToolResult.error(
+                    ToolErrorCode.PERMISSION_DENIED,
+                    f"The call to {self.name} was denied: {reason}.",
+                ).to_tool_content()
 
         try:
             result = await hub.call_tool(self.server_id, self.remote_tool_name, kwargs)
