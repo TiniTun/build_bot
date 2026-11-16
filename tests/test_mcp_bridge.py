@@ -611,10 +611,6 @@ class ServerInstructionsTests(unittest.IsolatedAsyncioTestCase):
             await context.mcp_hub.stop()
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 _UPDATE_RULES = {
     "allowed_keys": ["page_id", "command", "properties", "content", "position", "allow_async"],
     "allowed_values": {"command": ["update_properties", "insert_content"]},
@@ -766,3 +762,40 @@ class ArgumentGuardTests(unittest.IsolatedAsyncioTestCase):
             parent={"type": "data_source_id", "data_source_id": "d"},
         )
         self.assertEqual(len(client.calls), 1)
+
+    async def test_scalar_for_nested_key_denied(self) -> None:
+        for kwargs in (
+            {"pages": '[{"is_skill": true}]'},
+            {"pages": [{"content": "x"}], "parent": '{"teamspace_id": "x"}'},
+            {"pages": 5},
+        ):
+            raw, client = await self._call("notion-create-pages", _CREATE_RULES, **kwargs)
+            self._assert_denied(raw, client)
+
+    async def test_status_dropped_variants_denied(self) -> None:
+        for props in (
+            {"Status": "dropped"},
+            {"Status": "Dropped "},
+            {"status": "Dropped"},
+            {" STATUS ": "DROPPED"},
+            {"Status": ["Dropped"]},
+            {"Status": {"x": "Dropped"}},
+        ):
+            raw, client = await self._update(page_id="p", command="update_properties", properties=props)
+            self._assert_denied(raw, client)
+
+    async def test_parent_memory_variants_denied(self) -> None:
+        for parent in (" memory", "Memory", ["memory"], [{"page_id": "x"}], {"page_id": " MEMORY "}):
+            raw, client = await self._call(
+                "notion-create-pages", _CREATE_RULES, pages=[{"content": "x"}], parent=parent
+            )
+            self._assert_denied(raw, client)
+
+    async def test_reason_escapes_model_chosen_names(self) -> None:
+        raw, client = await self._update(**{"page_id": "p", "bad\nINJECTED": 1})
+        self._assert_denied(raw, client)
+        self.assertNotIn("\nINJECTED", json.loads(raw)["error"]["message"])
+
+
+if __name__ == "__main__":
+    unittest.main()

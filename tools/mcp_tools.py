@@ -182,16 +182,37 @@ def _plain(value: Any) -> Any:
     return value
 
 
-def _matches(actual: Any, forbidden: Any) -> bool:
-    """Equality that never raises; unhashable/odd values simply do not match."""
-    try:
-        return bool(actual == forbidden)
-    except Exception:  # noqa: BLE001 - uncomparable means "evaluate conservatively"
-        return False
+def _norm(value: Any) -> Any:
+    """Normalise strings (casefold + strip) so case/whitespace cannot dodge a rule."""
+    return value.casefold().strip() if isinstance(value, str) else value
 
 
 def _is_plain_scalar(value: Any) -> bool:
     return value is None or isinstance(value, (str, int, float, bool))
+
+
+def _matches(actual: Any, forbidden: Any) -> bool:
+    return bool(_norm(actual) == _norm(forbidden))
+
+
+def _forbidden_hit(value: Any, forbidden: list[Any]) -> bool | None:
+    """True if ``value`` (or a list element) equals a forbidden value.
+
+    None means the value cannot be compared (e.g. a mapping or nested list):
+    callers deny, since an unevaluable rule must fail closed.
+    """
+    items = value if isinstance(value, (list, tuple)) else [value]
+    for item in items:
+        if not _is_plain_scalar(item):
+            return None
+        if any(_matches(item, f) for f in forbidden):
+            return True
+    return False
+
+
+def _safe(name: Any) -> str:
+    """Model-chosen names are quoted and truncated so they cannot inject log lines."""
+    return repr(str(name)[:64])
 
 
 def check_arguments(rules: McpArgumentRules, arguments: Mapping[str, Any]) -> str | None:
@@ -213,39 +234,50 @@ def check_arguments(rules: McpArgumentRules, arguments: Mapping[str, Any]) -> st
 
 
 def _check(rules: McpArgumentRules, arguments: Mapping[str, Any], path: str) -> str | None:
-    def at(key: str) -> str:
-        return f"{path}{key}"
+    def at(key: Any) -> str:
+        return f"{path}{str(key)[:64]}"
 
     if rules.allowed_keys is not None:
         for key in arguments:
             if key not in rules.allowed_keys:
-                return f"argument '{at(key)}' is not permitted"
+                return f"argument {_safe(at(key))} is not permitted"
 
     for key, allowed in rules.allowed_values.items():
         if key not in arguments:
             continue
         value = arguments[key]
         if not _is_plain_scalar(value) or not any(_matches(value, a) for a in allowed):
-            return f"value of '{at(key)}' is not permitted"
+            return f"value of {_safe(at(key))} is not permitted"
 
     for key, forbidden in rules.forbidden_values.items():
         if key not in arguments:
             continue
         value = arguments[key]
-        candidates = list(value.values()) if isinstance(value, Mapping) else [value]
-        if any(_matches(c, f) for c in candidates for f in forbidden):
-            return f"value of '{at(key)}' is not permitted"
+        if isinstance(value, Mapping):
+            hit = _forbidden_hit(list(value.values()), forbidden)
+        elif isinstance(value, (list, tuple)):
+            hit = None  # a list is never a valid shape for these keys
+        else:
+            hit = _forbidden_hit(value, forbidden)
+        if hit is None or hit:
+            return f"value of {_safe(at(key))} is not permitted"
 
     if (rules.forbid_null_properties or rules.forbidden_property_values) and "properties" in arguments:
         props = arguments["properties"]
         if not isinstance(props, Mapping):
-            return f"'{at('properties')}' must be an object"
+            return f"{_safe(at('properties'))} must be an object"
+        forbidden_by_name: dict[str, list[Any]] = {}
+        for rule_name, values in rules.forbidden_property_values.items():
+            forbidden_by_name.setdefault(_norm(rule_name), []).extend(values)
         for name, value in props.items():
+            where = _safe(f"{at('properties')}.{name}")
             if rules.forbid_null_properties and value is None:
-                return f"property '{at('properties')}.{name}' may not be null"
-            for f in rules.forbidden_property_values.get(name, []):
-                if _matches(value, f):
-                    return f"value of property '{at('properties')}.{name}' is not permitted"
+                return f"property {where} may not be null"
+            forbidden = forbidden_by_name.get(_norm(name))
+            if forbidden:
+                hit = _forbidden_hit(value, forbidden)
+                if hit is None or hit:
+                    return f"value of property {where} is not permitted"
 
     for key, sub in rules.nested.items():
         if key not in arguments:
@@ -258,12 +290,12 @@ def _check(rules: McpArgumentRules, arguments: Mapping[str, Any], path: str) -> 
         elif isinstance(value, (list, tuple)):
             for index, item in enumerate(value):
                 if not isinstance(item, Mapping):
-                    return f"'{at(key)}[{index}]' must be an object"
+                    return f"{_safe(f'{at(key)}[{index}]')} must be an object"
                 reason = _check(sub, item, f"{at(key)}[{index}].")
                 if reason is not None:
                     return reason
-        elif not _is_plain_scalar(value):
-            return f"'{at(key)}' has an unsupported type"
+        elif value is not None:
+            return f"{_safe(at(key))} must be an object or a list of objects"
     return None
 
 
