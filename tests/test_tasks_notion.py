@@ -250,7 +250,7 @@ class McpErrorMappingTests(unittest.TestCase):
             self.assertEqual(error.code, ToolErrorCode.AUTH_MISSING, msg=type(exc).__name__)
             self.assertFalse(error.retryable)
             self.assertEqual(
-                error.user_action, "Notion needs a re-login: run build-bot mcp-login notion on the bot host"
+                error.user_action, "Notion needs a re-login: on bakeryd run build-bot --workspace ./default_workspace mcp-login notion"
             )
 
     def test_not_connected_is_retryable_later(self) -> None:

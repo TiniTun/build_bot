@@ -30,7 +30,7 @@ def provider_exception_to_result(exc: Exception) -> ToolResult:
         return ToolResult.error(
             ToolErrorCode.AUTH_MISSING,
             "Notion is not authenticated.",
-            user_action="Notion needs a re-login: run build-bot mcp-login notion on the bot host",
+            user_action="Notion needs a re-login: on bakeryd run build-bot --workspace ./default_workspace mcp-login notion",
         )
     if isinstance(exc, McpNotConnectedError):
         return ToolResult.error(
