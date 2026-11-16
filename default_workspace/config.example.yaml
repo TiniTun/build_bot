@@ -251,6 +251,7 @@ default_agent: pickle
 #             allowed_keys: [page_id, command, properties, content, position, allow_async]
 #             allowed_values:
 #               command: [update_properties, insert_content]
+#               allow_async: [false]   # an async write returns a task the bot cannot poll
 #             forbid_null_properties: true
 #             forbidden_property_values:
 #               Status: [Dropped]
@@ -260,6 +261,8 @@ default_agent: pickle
 #           retry: never
 #           arguments:
 #             allowed_keys: [pages, parent, allow_async, creation_mode, instructions_version, skill]
+#             allowed_values:
+#               allow_async: [false]
 #             forbidden_values:
 #               parent: [memory]
 #             nested:

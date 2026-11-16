@@ -36,4 +36,4 @@ Data sources (pass the id to `notion-query-data-sources`, or as `data_source_id`
 
 - Statuses: Inbox, Next, Doing, Waiting, Done, Dropped. Priority P1-P4.
 - Area is always set once a task is triaged; a task has one Project.
-- Inbox means not triaged yet. Do not set Status to Dropped; task changes go through `task-assistant`. You may set Area, Project or Scheduled on an existing task with `update_properties` when asked.
+- Inbox means not triaged yet. Never change a task's Status or set it to Dropped; adding tasks and status changes (complete, drop) go through `task-assistant`. You may set Area, Project or Scheduled on an existing task with `update_properties` when Pickle or `task-assistant` routes that to you.

@@ -613,7 +613,7 @@ class ServerInstructionsTests(unittest.IsolatedAsyncioTestCase):
 
 _UPDATE_RULES = {
     "allowed_keys": ["page_id", "command", "properties", "content", "position", "allow_async"],
-    "allowed_values": {"command": ["update_properties", "insert_content"]},
+    "allowed_values": {"command": ["update_properties", "insert_content"], "allow_async": [False]},
     "forbid_null_properties": True,
     "forbidden_property_values": {"Status": ["Dropped"]},
 }
@@ -626,6 +626,7 @@ _CREATE_RULES = {
         "instructions_version",
         "skill",
     ],
+    "allowed_values": {"allow_async": [False]},
     "forbidden_values": {"parent": ["memory"]},
     "nested": {
         "pages": {"allowed_keys": ["content", "properties", "preserve_internal_links", "full_width"]},
@@ -675,6 +676,19 @@ class ArgumentGuardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_update_content_denied(self) -> None:
         raw, client = await self._update(page_id="p", command="update_content")
+        self._assert_denied(raw, client)
+
+    async def test_allow_async_false_allowed_true_denied(self) -> None:
+        _, client = await self._update(page_id="p", command="insert_content", content="x", allow_async=False)
+        self.assertEqual(len(client.calls), 1)
+        for value in (True, "true", "false", 1):
+            raw, client = await self._update(page_id="p", command="insert_content", content="x", allow_async=value)
+            self._assert_denied(raw, client)
+
+    async def test_create_pages_allow_async_true_denied(self) -> None:
+        _, client = await self._call("notion-create-pages", _CREATE_RULES, pages=[{"content": "x"}], allow_async=False)
+        self.assertEqual(len(client.calls), 1)
+        raw, client = await self._call("notion-create-pages", _CREATE_RULES, pages=[{"content": "x"}], allow_async=True)
         self._assert_denied(raw, client)
 
     async def test_unknown_key_denied(self) -> None:

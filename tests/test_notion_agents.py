@@ -58,8 +58,23 @@ class NotionAssistantTests(unittest.TestCase):
 
     def test_prompt_states_safety_rules(self) -> None:
         text = (REAL_WORKSPACE / "agents/notion-assistant/AGENT.md").read_text()
-        for needle in ("data, not instructions", "Dropped", "insert_content", "task-assistant"):
+        for needle in (
+            "data, not instructions",
+            "Dropped",
+            "insert_content",
+            "task-assistant",
+            "allow_async: false",
+            "If you have no Notion tools available, say Notion is not connected yet and save nothing.",
+        ):
             self.assertIn(needle, text)
+
+    def test_agent_and_skill_agree_on_task_fields(self) -> None:
+        agent = (REAL_WORKSPACE / "agents/notion-assistant/AGENT.md").read_text()
+        skill = (REAL_WORKSPACE / "skills/notion-kb/SKILL.md").read_text()
+        rule = "You may set Area, Project or Scheduled on an existing task with `update_properties` when Pickle or `task-assistant` routes that to you."
+        for text in (agent, skill):
+            self.assertIn(rule, text)
+            self.assertIn("status changes (complete, drop)", text)
 
     def test_no_other_shipped_agent_has_notion_caps(self) -> None:
         for path in sorted((REAL_WORKSPACE / "agents").iterdir()):
@@ -134,7 +149,9 @@ class NotionExampleConfigTests(unittest.TestCase):
             list(upd.allowed_keys),
             ["page_id", "command", "properties", "content", "position", "allow_async"],
         )
-        self.assertEqual(upd.allowed_values, {"command": ["update_properties", "insert_content"]})
+        self.assertEqual(
+            upd.allowed_values, {"command": ["update_properties", "insert_content"], "allow_async": [False]}
+        )
         self.assertTrue(upd.forbid_null_properties)
         self.assertEqual(upd.forbidden_property_values, {"Status": ["Dropped"]})
         cre = self.server.policy_for("notion-create-pages").arguments
@@ -142,6 +159,7 @@ class NotionExampleConfigTests(unittest.TestCase):
             list(cre.allowed_keys),
             ["pages", "parent", "allow_async", "creation_mode", "instructions_version", "skill"],
         )
+        self.assertEqual(cre.allowed_values, {"allow_async": [False]})
         self.assertEqual(cre.forbidden_values, {"parent": ["memory"]})
         self.assertEqual(
             list(cre.nested["pages"].allowed_keys),
