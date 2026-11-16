@@ -120,7 +120,8 @@ uv run ruff format .
 - Server annotations/descriptions/instructions are untrusted; they never grant access or bypass confirmation. `use_server_instructions` is opt-in, per-agent, and size-capped.
 - Sessions get stable tool schemas; `McpTool.execute` re-checks `hub.is_tool_available` at call time.
 - No call is ever retried automatically. A timeout is ambiguous and is reported as non-retryable.
-- Bearer tokens come from `token_env` only, are attached to every request in the session, and are redacted from every error, log, and `/mcp` output.
+- Bearer tokens come from `token_env` or from the OAuth token store (`auth: {type: oauth, token_store}`), are attached to every request in the session, and are redacted from every error, log, and `/mcp` output.
+- OAuth login (hosted Notion): on the Pi run `ssh -L 33418:127.0.0.1:33418 bakeryd`, then `build-bot --workspace ./default_workspace mcp-login notion`. The server picks up the new store without restart. A dead grant sets state `LOGIN_REQUIRED` and sends one Telegram notice.
 - Config hot-reload reaches the hub through `Config.add_reload_listener` → `McpHub.request_reconcile()`, which only signals the loop from the watchdog thread.
 - Tests use `tests/mcp_fakes.py`: `FakeMcpHttpServer` (real SDK over `httpx2.MockTransport`) for protocol facts, `FakeMcpClient` for lifecycle and policy.
 

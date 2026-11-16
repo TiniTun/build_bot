@@ -101,6 +101,12 @@ default_agent: pickle
 #     api_token_env: TODOIST_API_TOKEN
 #     # Minutes assumed for a task with no duration label (15m/30m/60m/90m/1h).
 #     default_duration_minutes: 30
+#   # Notion instead of Todoist (needs the `notion` MCP server below):
+#   # tasks:
+#   #   enabled: true
+#   #   provider: notion
+#   #   mcp_server: notion
+#   #   data_source_id: 0b2c30e0-3aa2-47bb-85b7-69a1032cca73
 # tools:
 #   # When enabled_capabilities is set, only listed dotted ids are available. The
 #   # final per-agent tool set is the intersection of this list and the agent's
@@ -109,7 +115,7 @@ default_agent: pickle
 #   # If this list is set, EVERY capability an agent uses must appear here — the
 #   # per-agent list is an intersection, not an override. Omitting the planning
 #   # ids below gives daily-planner zero tools, silently, with no error.
-#   enabled_capabilities: [memory.search, memory.store_fact, memory.store_preference, memory.store_project_context, memory.store_decision, memory.append_daily_note, email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event, tasks.quick_add, tasks.inbox, tasks.today, tasks.overdue, tasks.search, tasks.update, tasks.complete, tasks.delete, tasks.bulk_update, calendar.day_agenda, planning.build_day_plan, planning.sync_daily_plan, mcp.movies_db.movies_get_taste_profile, mcp.movies_db.movies_get_viewing, mcp.movies_db.movies_recommend, mcp.movies_db.movies_resolve_title, mcp.movies_db.movies_search_library, mcp.movies_db.movies_search_catalog, mcp.movies_db.movies_log_viewing, mcp.movies_db.movies_update_viewing, mcp.movies_db.movies_record_feedback]
+#   enabled_capabilities: [memory.search, memory.store_fact, memory.store_preference, memory.store_project_context, memory.store_decision, memory.append_daily_note, email.search, email.read, email.draft_reply, calendar.search, calendar.availability, calendar.create_event, tasks.quick_add, tasks.inbox, tasks.today, tasks.overdue, tasks.search, tasks.update, tasks.complete, tasks.delete, tasks.bulk_update, calendar.day_agenda, planning.build_day_plan, planning.sync_daily_plan, mcp.movies_db.movies_get_taste_profile, mcp.movies_db.movies_get_viewing, mcp.movies_db.movies_recommend, mcp.movies_db.movies_resolve_title, mcp.movies_db.movies_search_library, mcp.movies_db.movies_search_catalog, mcp.movies_db.movies_log_viewing, mcp.movies_db.movies_update_viewing, mcp.movies_db.movies_record_feedback, mcp.notion.notion-search, mcp.notion.notion-fetch, mcp.notion.notion-query-data-sources, mcp.notion.notion-get-self, mcp.notion.notion-create-pages, mcp.notion.notion-update-page]
 #   risk_policy: {read: allow, draft: allow, confirm_required: require_confirmation, write: allow}
 
 # Remote MCP (Model Context Protocol) servers. Omit this block entirely to keep
@@ -187,6 +193,80 @@ default_agent: pickle
 #       # agent-visible capability — what keeps raw WHOOP data structurally
 #       # out of the model's context, regardless of which agent is running.
 #       expose_to_agents: false
+#       use_server_instructions: false
+
+# notion-mcp-example: hosted Notion MCP over OAuth (no token in config). Merge under
+# the same `mcp.servers` key. Log in once on the host that runs the bot:
+#   ssh -L 33418:127.0.0.1:33418 bakeryd
+#   build-bot --workspace ./default_workspace mcp-login notion
+# A running server picks up the new token store without a restart. A dead grant
+# moves the server to `login_required` and sends one Telegram notice.
+# Only `notion-assistant` holds these capabilities. Argument rules apply to agent
+# calls only (not to host calls by the task provider) and deny anything not listed.
+# mcp:
+#   servers:
+#     notion:
+#       enabled: true
+#       transport: streamable_http
+#       url: https://mcp.notion.com/mcp
+#       auth:
+#         type: oauth
+#         token_store: .secrets/mcp/notion.json
+#         callback_port: 33418
+#       required: false
+#       allowed_tools:
+#         - notion-search
+#         - notion-fetch
+#         - notion-query-data-sources
+#         - notion-get-self
+#         - notion-create-pages
+#         - notion-update-page
+#       denied_tools:
+#         - notion-delete-pages
+#         - notion-move-pages
+#         - notion-duplicate-page
+#         - notion-create-database
+#         - notion-update-data-source
+#         - notion-delete-databases
+#         - notion-restore-pages
+#         - notion-update-page-favorites
+#         - notion-update-sidebar-tabs
+#         - notion-upload-skill
+#         - notion-convert-page-to-skill
+#         - notion-update-skill-settings
+#         - notion-create-comment
+#         - notion-delete-comment
+#         - notion-spawn-session
+#         - notion-send-message-to-session
+#       tool_policies:
+#         notion-search: {effect: read, confirmation: none, retry: never}
+#         notion-fetch: {effect: read, confirmation: none, retry: never}
+#         notion-query-data-sources: {effect: read, confirmation: none, retry: never}
+#         notion-get-self: {effect: read, confirmation: none, retry: never}
+#         notion-update-page:
+#           effect: write
+#           confirmation: none
+#           retry: never
+#           arguments:
+#             allowed_keys: [page_id, command, properties, content, position, allow_async]
+#             allowed_values:
+#               command: [update_properties, insert_content]
+#             forbid_null_properties: true
+#             forbidden_property_values:
+#               Status: [Dropped]
+#         notion-create-pages:
+#           effect: write
+#           confirmation: none
+#           retry: never
+#           arguments:
+#             allowed_keys: [pages, parent, allow_async, creation_mode, instructions_version, skill]
+#             forbidden_values:
+#               parent: [memory]
+#             nested:
+#               pages:
+#                 allowed_keys: [content, properties, preserve_internal_links, full_width]
+#               parent:
+#                 allowed_keys: [type, page_id, database_id, data_source_id]
 #       use_server_instructions: false
 
 # Opt-in durable-memory workflows. Both default to false (no runtime behavior).
