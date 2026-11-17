@@ -356,7 +356,7 @@ class TelegramChannel(Channel[TelegramEventSource]):
         self, on_message: Callable[[str, TelegramEventSource], Awaitable[None]]
     ) -> None:
         """Run the Telegram channel. Blocks until stop() is called."""
-        if self.application is not None: # @todo тут валится ошибка 
+        if self.application is not None:
             raise RuntimeError("TelegramChannel already running")
 
         logger.info(f"Channel enabled with platform: {self.platform_name}")
@@ -410,11 +410,17 @@ class TelegramChannel(Channel[TelegramEventSource]):
         self.application.add_handler(CallbackQueryHandler(handle_callback))
         self.application.add_error_handler(handle_error)
 
-        # Start the bot
-        await self.application.initialize()
-        await self.application.start()
-        if self.application.updater:
-            await self.application.updater.start_polling()
+        # Start the bot. A failure here (e.g. DNS not up yet at boot) must not
+        # leave self.application set, or every restart by the server monitor
+        # fails with "already running" instead of retrying the start.
+        try:
+            await self.application.initialize()
+            await self.application.start()
+            if self.application.updater:
+                await self.application.updater.start_polling()
+        except Exception:
+            await self._discard_application()
+            raise
 
         logger.info("TelegramChannel started")
 
@@ -422,17 +428,42 @@ class TelegramChannel(Channel[TelegramEventSource]):
         async def run_until_stopped():
             """Run until stop() is called or updater stops unexpectedly."""
             while self.application and self.application.updater:
-                if self.application.updater.running:
-                    if self._stop_event and self._stop_event.is_set():
-                        return # Graceful stop
-                    await asyncio.sleep(1)
-                else:
-                    if self._stop_event and self._stop_event.is_set():
-                        raise RuntimeError("Telegram updater stopped unexpectedly")
-                    return
+                if self._stop_event and self._stop_event.is_set():
+                    return  # Graceful stop
+                if not self.application.updater.running:
+                    raise RuntimeError("Telegram updater stopped unexpectedly")
+                await asyncio.sleep(1)
 
         self._running_task = asyncio.create_task(run_until_stopped())
-        await self._running_task
+        try:
+            await self._running_task
+        except Exception:
+            await self._discard_application()
+            raise
+
+    async def _discard_application(self) -> None:
+        """Best-effort teardown of an application that failed to start or run.
+
+        Only undoes the steps that actually happened: python-telegram-bot raises
+        on stop() of an application that is not running. Cleanup errors are
+        logged, never raised, so the original failure reaches the caller.
+        """
+        application = self.application
+        self.application = None
+        self._running_task = None
+        self._stop_event = None
+        if application is None:
+            return
+        try:
+            if application.updater and application.updater.running:
+                await application.updater.stop()
+            if application.running:
+                await application.stop()
+            await application.shutdown()
+        except Exception:
+            logger.warning(
+                "Cleanup after failed Telegram start raised", exc_info=True
+            )
 
     @staticmethod
     def _build_confirmation_keyboard(
